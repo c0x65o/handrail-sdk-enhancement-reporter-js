@@ -334,3 +334,27 @@ function SuggestionForm() {
 - Handrail resolves the session through Known Users and scopes submit, list, lookup, attachment, dismissal, restoration, bulk history clearing, cancellation, and release status to that principal.
 - Server code allowlists intake fields and drops browser-supplied implementation, Codex, commit, CI, and deployment authority.
 - Handrail enhancement transport credentials remain server-only.
+
+### Opt-in All users history
+
+`list({ audience: "all", signal })` and
+`lookup(id, { audience: "all", signal })` request shared history. The default is
+Mine; `visibility: "all"` still means active plus personally archived requests.
+Each shared read fetches fresh policy and requires authenticated Known Users
+identity plus `enhancement_reporting.history.all_users === true`. The server
+rechecks its saved Automation opt-in and current session for every read.
+
+The packaged dialog adds **Mine / All users** only from verified discovery.
+Pass a non-secret `sessionKey` to `EnhancementReporterProvider` or the standalone
+`EnhancementReporterDialog`, changing it on sign-out, account or tenant switch.
+Client changes reset the dialog; pending history is aborted and stale responses
+are discarded. Headless integrations must abort/discard their retained data on
+the same transitions. Never use the raw application session as `sessionKey`.
+
+Shared content includes titles, descriptions, priority, status and dates within
+the current Handrail project/environment/identity source. Attachments, private
+context, reporter identity, assessment/work IDs and release journeys remain
+private. Other users' records have `is_owner: false`; archive, restore, cancel,
+notifications and implementation authority are unchanged. This is project-wide
+sharing, not application subtenant authorization: leave OFF if those subtenants
+share one Known Users source and must not see each other's report text.

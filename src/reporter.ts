@@ -95,6 +95,7 @@ export type EnhancementHistorySort = (typeof ENHANCEMENT_HISTORY_SORTS)[number];
 export type EnhancementHistoryVisibility = (typeof ENHANCEMENT_HISTORY_VISIBILITIES)[number];
 
 export interface EnhancementHistoryCapabilities {
+  readonly all_users?: boolean;
   /** True when this verified principal may use owned history. Independent of later implementation authorization. */
   readonly enabled?: boolean;
   readonly summary: boolean;
@@ -142,6 +143,7 @@ export interface EnhancementReporterDiscovery {
 }
 
 export interface EnhancementRequestRecord {
+  readonly is_owner?: boolean;
   readonly id: string;
   readonly title: string;
   readonly description?: string | null;
@@ -253,6 +255,7 @@ export interface EnhancementHistorySummary {
 }
 
 export interface EnhancementHistoryQuery {
+  readonly audience?: "mine" | "all";
   readonly search: string;
   readonly statusGroup: EnhancementHistoryStatusGroup | null;
   readonly sort: EnhancementHistorySort;
@@ -260,6 +263,8 @@ export interface EnhancementHistoryQuery {
 }
 
 export interface EnhancementHistoryListOptions {
+  readonly audience?: "mine" | "all";
+  readonly signal?: AbortSignal;
   readonly limit?: number;
   readonly offset?: number;
   readonly search?: string;
@@ -491,17 +496,25 @@ export interface EnhancementReporterClient {
   readonly appVersion?: string;
   readonly reporterEmail?: string;
   readonly notificationsEnabled?: boolean;
-  discover(): Promise<EnhancementReporterDiscovery>;
+  discover(signal?: AbortSignal): Promise<EnhancementReporterDiscovery>;
   submit(input: EnhancementRequestInput): Promise<EnhancementSubmissionResult>;
   subscribeToUpdates(requestId: string, preference: EnhancementNotificationPreference): Promise<EnhancementNotificationSubscription>;
   list(options?: EnhancementHistoryListOptions): Promise<EnhancementRequestPage>;
-  lookup(requestId: string): Promise<EnhancementRequestRecord>;
+  lookup(requestId: string, options?: { audience?: "mine" | "all"; signal?: AbortSignal }): Promise<EnhancementRequestRecord>;
   releaseStatus(requestId: string): Promise<any>;
   dismiss(requestId: string): Promise<EnhancementDismissResult>;
   restore(requestId: string): Promise<EnhancementRestoreResult>;
   dismissSucceeded(): Promise<EnhancementDismissSucceededResult>;
   cancel(requestId: string, reason?: string): Promise<EnhancementRequestRecord>;
   attachmentUrl(requestId: string, attachmentId: string): string;
+}
+
+export function allUsersHistoryAllowed(discovery: EnhancementReporterDiscovery | null | undefined): boolean {
+  const principal = discovery?.principal as { authenticated?: unknown; authentication_method?: unknown } | undefined;
+  return discovery?.contract_version === "v1" && principal?.authenticated === true
+    && principal.authentication_method === "known_users_direct_session"
+    && discovery?.enhancement_reporting?.history?.enabled === true
+    && discovery.enhancement_reporting.history.all_users === true;
 }
 
 export function createEnhancementReporter(config: EnhancementReporterConfig = {}): EnhancementReporterClient {
@@ -516,11 +529,21 @@ export function createEnhancementReporter(config: EnhancementReporterConfig = {}
 
   const request = async (path: string, init: RequestInit = {}) => {
     if (!enabled) throw new EnhancementReporterError("disabled", "Enhancement reporting is disabled.");
-    return responseJson(await fetchImpl(`${endpoint}${path}`, {
+    const response = await fetchImpl(`${endpoint}${path}`, {
       ...init,
       credentials: "same-origin",
       headers: { accept: "application/json", ...(init.body ? { "content-type": "application/json" } : {}), ...init.headers },
-    }));
+    });
+    if (init.signal?.aborted) throw new EnhancementReporterError("request_cancelled", "History request was cancelled.");
+    const body = await responseJson(response);
+    if (init.signal?.aborted) throw new EnhancementReporterError("request_cancelled", "History request was cancelled.");
+    return body;
+  };
+
+  const requireSharing = async (signal?: AbortSignal) => {
+    if (!allUsersHistoryAllowed(await request("/policy", { signal }))) {
+      throw new EnhancementReporterError("sharing_unavailable", "All users history is unavailable.");
+    }
   };
 
   const subscribeToUpdates = async (
@@ -559,7 +582,7 @@ export function createEnhancementReporter(config: EnhancementReporterConfig = {}
     appVersion,
     reporterEmail,
     notificationsEnabled,
-    discover: () => request("/policy"),
+    discover: (signal?: AbortSignal) => request("/policy", { signal }),
     async submit(input: EnhancementRequestInput) {
       const title = clean(input.title, 500);
       const description = clean(input.description, 20_000);
@@ -606,16 +629,21 @@ export function createEnhancementReporter(config: EnhancementReporterConfig = {}
       }
     },
     subscribeToUpdates,
-    list(options: EnhancementHistoryListOptions = {}) {
+    async list(options: EnhancementHistoryListOptions = {}) {
+      if (options.audience === "all") await requireSharing(options.signal);
       const { limit = 20, offset = 0, search, statusGroup, sort, visibility } = options;
       const query = new URLSearchParams({ limit: String(limit), offset: String(offset) });
       if (clean(search, 200)) query.set("search", clean(search, 200));
       if (statusGroup) query.set("status_group", statusGroup);
       if (sort) query.set("sort", sort);
       if (visibility) query.set("visibility", visibility);
-      return request(`?${query.toString()}`);
+      if (options.audience === "all") query.set("audience", "all");
+      return request(`?${query.toString()}`, { signal: options.signal });
     },
-    lookup(requestId: string) { return request(`/requests/${encodeURIComponent(requestId)}`); },
+    async lookup(requestId: string, options: { audience?: "mine" | "all"; signal?: AbortSignal } = {}) {
+      if (options.audience === "all") await requireSharing(options.signal);
+      return request(`/requests/${encodeURIComponent(requestId)}${options.audience === "all" ? "?audience=all" : ""}`, { signal: options.signal });
+    },
     releaseStatus(requestId: string) { return request(`/requests/${encodeURIComponent(requestId)}/release-status`); },
     dismiss(requestId: string) { return request(`/requests/${encodeURIComponent(requestId)}/dismiss`, { method: "POST", body: "{}" }); },
     restore(requestId: string) { return request(`/requests/${encodeURIComponent(requestId)}/dismiss`, { method: "DELETE" }); },

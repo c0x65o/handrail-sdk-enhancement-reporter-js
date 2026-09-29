@@ -374,7 +374,7 @@ test("Default Known Users receive capability-driven history without automation a
     },
   }));
   sdk.list = async (options) => {
-    listCalls.push(options);
+    listCalls.push({ ...options, signal: undefined });
     return { contract_version: "v1", requests: [dismissed], pagination: { limit: options.limit, offset: 0, total: 1, has_more: false }, summary: { total: 1, needs_attention: 0, in_progress: 0, succeeded: 1, closed: 0 } };
   };
   sdk.restore = async (id) => { restoreCalls.push(id); return { request_id: id }; };
@@ -414,7 +414,7 @@ test("Default Known Users receive capability-driven history without automation a
   assert.match(JSON.stringify(renderer.toJSON()), /Confirmation/);
   assert.match(JSON.stringify(renderer.toJSON()), /Confirmed in/);
   assert.match(JSON.stringify(renderer.toJSON()), /Manual handoffs/);
-  assert.deepEqual(listCalls[0], { limit: 10, offset: 0, search: undefined, statusGroup: undefined, sort: "newest", visibility: "active" });
+  assert.deepEqual(listCalls[0], { audience: "mine", signal: undefined, limit: 10, offset: 0, search: undefined, statusGroup: undefined, sort: "newest", visibility: "active" });
 
   await act(async () => {
     renderer.root.findByProps({ "aria-label": "Search my requests" }).props.onChange({ target: { value: "filters" } });
@@ -424,7 +424,7 @@ test("Default Known Users receive capability-driven history without automation a
   });
   const historyForm = renderer.root.findAllByType("form")[0];
   await act(async () => historyForm.props.onSubmit({ preventDefault() {} }));
-  assert.deepEqual(listCalls.at(-1), { limit: 10, offset: 0, search: "filters", statusGroup: "succeeded", sort: "newest", visibility: "all" });
+  assert.deepEqual(listCalls.at(-1), { audience: "mine", signal: undefined, limit: 10, offset: 0, search: "filters", statusGroup: "succeeded", sort: "newest", visibility: "all" });
   await act(async () => renderer.root.findByProps({ "aria-label": "Restore Saved filters" }).props.onClick());
   assert.deepEqual(restoreCalls, ["enh-1"]);
   await act(async () => renderer.unmount());
@@ -450,7 +450,7 @@ test("archiving refreshes enhancement filter counts and refills the current page
     },
   }));
   sdk.list = async (options) => {
-    listCalls.push(options);
+    listCalls.push({ ...options, signal: undefined });
     return {
       contract_version: "v1",
       requests: archived ? [] : [request],
@@ -506,7 +506,7 @@ test("a submitted enhancement immediately invalidates and refreshes previously l
     },
   }));
   sdk.list = async (options) => {
-    listCalls.push(options);
+    listCalls.push({ ...options, signal: undefined });
     return {
       contract_version: "v1",
       requests: [...requests],
@@ -738,4 +738,28 @@ test("My requests refreshes every 15 seconds while the history view stays open",
     globalThis.clearInterval = originalClearInterval;
     await act(async () => renderer.unmount());
   }
+});
+
+test('All users is verified-policy-only, read-only, and session changes cancel old history', async () => {
+  let release, oldSignal, hold = false;
+  const sdk = client(async () => ({ contract_version: 'v1', principal: { authenticated: true, authentication_method: 'known_users_direct_session' }, ...discovery({ history: { enabled: true, all_users: true, visibilities: ['active'], sorts: ['newest'], status_groups: [], search: true, restore: true } }) }));
+  sdk.list = async options => {
+    if (hold) { oldSignal = options.signal; await new Promise(resolve => { release = resolve; }); }
+    return { contract_version: 'v1', requests: options.audience === 'all' ? [{ id: 'bob', title: 'Bob report', status: 'received', status_group: 'needs_attention', is_owner: false, terminal: false, dismissed: false, dismissed_at: null, attachments: [] }] : [], pagination: { total: options.audience === 'all' ? 1 : 0, has_more: false }, summary: null };
+  };
+  let renderer;
+  const props = { open: true, onClose() {}, client: sdk };
+  await act(async () => { renderer = create(createElement(EnhancementReporterDialog, { ...props, sessionKey: 'alice' })); });
+  await act(async () => renderer.root.findByProps({ 'data-handrail-enhancement-view-switch': 'history' }).props.onClick());
+  await act(async () => { renderer.root.findAllByType('button').find(b => b.children.join('') === 'All users').props.onClick(); });
+  assert.equal(renderer.root.findAllByProps({ 'aria-label': 'View Bob report' }).length, 1);
+  assert.equal(renderer.root.findAllByProps({ 'aria-label': 'Archive Bob report' }).length, 0);
+  hold = true;
+  await act(async () => { renderer.root.findAllByType('button').find(b => b.children.join('') === 'All users').props.onClick(); });
+  hold = false;
+  await act(async () => { renderer.update(createElement(EnhancementReporterDialog, { ...props, sessionKey: 'bob' })); });
+  assert.equal(oldSignal.aborted, true);
+  await act(async () => { release(); });
+  assert.equal(renderer.root.findAllByProps({ 'aria-label': 'View Bob report' }).length, 0);
+  await act(async () => renderer.unmount());
 });

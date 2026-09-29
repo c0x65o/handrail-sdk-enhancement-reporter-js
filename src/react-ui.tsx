@@ -20,6 +20,7 @@ import {
   MAX_ENHANCEMENT_IMAGE_BYTES,
   MAX_ENHANCEMENT_IMAGE_TOTAL_BYTES,
   enhancementReleaseSummary,
+  allUsersHistoryAllowed,
   type EnhancementHistoryCapabilities,
   type EnhancementHistoryListOptions,
   type EnhancementHistorySort,
@@ -106,6 +107,8 @@ export interface EnhancementReporterDialogProps {
   readonly appearance?: EnhancementReporterAppearance;
   /** Number of recent requests shown per page. Defaults to 10 and is capped at 50. */
   readonly historyPageSize?: number;
+  /** Non-secret revision changed on sign-out, account or tenant switch. */
+  readonly sessionKey?: string | number;
 }
 
 export interface EnhancementReporterButtonProps
@@ -941,9 +944,9 @@ function HistoryRow({
     <span role="cell" data-handrail-enhancement-history-cell="secondary" style={{ color: "var(--handrail-enhancement-muted-text)", fontSize: 11 }}>{requestDate(request.created_at)}</span>
     <div role="cell" data-handrail-enhancement-history-cell="action" style={{ display: "flex", justifyContent: "flex-end", gap: 10 }}>
       <button type="button" aria-expanded={expanded} aria-label={`View ${request.title}`} onClick={() => onToggle(request.id)} style={{ border: 0, padding: "6px 2px", color: "var(--handrail-enhancement-accent)", background: "transparent", cursor: "pointer", font: "inherit", fontSize: 12, fontWeight: 800 }}>View</button>
-      {request.dismissed && canRestore
+      {request.is_owner !== false && (request.dismissed && canRestore
         ? <button type="button" aria-label={`Restore ${request.title}`} disabled={busy} onClick={() => void onRestore(request.id)} style={{ border: 0, padding: "6px 2px", color: "var(--handrail-enhancement-accent)", background: "transparent", cursor: busy ? "wait" : "pointer", font: "inherit", fontSize: 12, fontWeight: 800 }}>{busy ? "Restoring…" : "Restore"}</button>
-        : !request.dismissed && <button type="button" aria-label={`Archive ${request.title}`} disabled={busy} onClick={() => void onArchive(request.id)} style={{ border: 0, padding: "6px 2px", color: "var(--handrail-enhancement-accent)", background: "transparent", cursor: busy ? "wait" : "pointer", font: "inherit", fontSize: 12, fontWeight: 800 }}>{busy ? "Archiving…" : "Archive"}</button>}
+        : !request.dismissed && <button type="button" aria-label={`Archive ${request.title}`} disabled={busy} onClick={() => void onArchive(request.id)} style={{ border: 0, padding: "6px 2px", color: "var(--handrail-enhancement-accent)", background: "transparent", cursor: busy ? "wait" : "pointer", font: "inherit", fontSize: 12, fontWeight: 800 }}>{busy ? "Archiving…" : "Archive"}</button>)}
     </div>
     {expanded && <div role="cell" data-handrail-enhancement-history-detail="true" style={{ gridColumn: "1 / -1", display: "grid", gridTemplateColumns: "minmax(0, 1.7fr) minmax(250px, .8fr)", gap: 12, padding: 12, border: "1px solid var(--handrail-enhancement-border)", borderRadius: 10, color: "var(--handrail-enhancement-muted-text)", background: "var(--handrail-enhancement-surface-muted)", fontSize: 11 }}>
       <section style={{ display: "grid", minWidth: 0, gap: 12 }}>
@@ -1002,7 +1005,16 @@ function HistoryRow({
   </article>;
 }
 
-export function EnhancementReporterDialog({
+export function EnhancementReporterDialog(props: EnhancementReporterDialogProps): ReactElement | null {
+  const contextClient = useOptionalEnhancementReporter();
+  const client = props.client || contextClient;
+  const previous = useRef(client);
+  const generation = useRef(0);
+  if (previous.current !== client) { previous.current = client; generation.current += 1; }
+  return <EnhancementSessionDialog key={`${props.sessionKey ?? ""}:${generation.current}`} {...props} />;
+}
+
+function EnhancementSessionDialog({
   open,
   onClose,
   client: explicitClient,
@@ -1038,6 +1050,8 @@ export function EnhancementReporterDialog({
   const [historySummary, setHistorySummary] = useState<EnhancementHistorySummary | null>(null);
   const [historyAvailable, setHistoryAvailable] = useState(false);
   const [historyCapabilities, setHistoryCapabilities] = useState<EnhancementHistoryCapabilities | null>(null);
+  const [historyAudience, setHistoryAudience] = useState<"mine" | "all">("mine");
+  const [allUsersAllowed, setAllUsersAllowed] = useState(false);
   const [historySearch, setHistorySearch] = useState("");
   const [historyStatus, setHistoryStatus] = useState<EnhancementHistoryStatusGroup | "">("");
   const [historySort, setHistorySort] = useState<EnhancementHistorySort>("newest");
@@ -1061,6 +1075,7 @@ export function EnhancementReporterDialog({
   const historyLoadingRef = useRef(false);
   const historyDiscoveryReadyRef = useRef(false);
   const historyGenerationRef = useRef(0);
+  const historyAbortRef = useRef<AbortController | null>(null);
   const dialogRef = useRef<HTMLElement | null>(null);
   const previousFocusRef = useRef<HTMLElement | null>(null);
   const imagePreviewTriggerRef = useRef<HTMLButtonElement | null>(null);
@@ -1083,23 +1098,29 @@ export function EnhancementReporterDialog({
     : risk ? `up to ${risk} change risk` : "not available";
 
   const currentHistoryQuery = useCallback((): EnhancementHistoryListOptions => ({
+    audience: historyAudience,
     search: historySearch.trim() || undefined,
     statusGroup: historyStatus || undefined,
     sort: historySort,
     visibility: historyVisibility,
-  }), [historySearch, historySort, historyStatus, historyVisibility]);
+  }), [historyAudience, historySearch, historySort, historyStatus, historyVisibility]);
 
   const loadHistory = useCallback(async (
     offset = 0,
     query: EnhancementHistoryListOptions = currentHistoryQuery(),
   ) => {
+    historyAbortRef.current?.abort();
+    const controller = new AbortController();
+    historyAbortRef.current = controller;
     const generation = ++historyGenerationRef.current;
     historyStaleRef.current = true;
     historyLoadingRef.current = true;
     setLoadingHistory(true);
+    if (offset === 0) { setHistory([]); setHistorySummary(null); setHistoryTotal(0); }
+    setExpandedRequestId(null); setHistoryImagePreview(null);
     setError(null);
     try {
-      const page = await client.list({ limit: pageSize, offset, ...query });
+      const page = await client.list({ limit: pageSize, offset, ...query, signal: controller.signal });
       if (generation !== historyGenerationRef.current) return;
       setHistory((current) => offset === 0
         ? page.requests
@@ -1113,6 +1134,8 @@ export function EnhancementReporterDialog({
       historyStaleRef.current = false;
     } catch (caught) {
       if (generation !== historyGenerationRef.current) return;
+      setHistory([]); setHistorySummary(null); setHistoryTotal(0); setHistoryHasMore(false);
+      setAllUsersAllowed(false); setHistoryAudience("mine");
       setError(caught instanceof Error
         ? caught.message
         : "Could not load enhancement requests.");
@@ -1139,6 +1162,8 @@ export function EnhancementReporterDialog({
     let cancelled = false;
     setTab("new");
     setHistoryAvailable(false);
+    setAllUsersAllowed(false); setHistoryAudience("mine");
+    historyAbortRef.current?.abort();
     historyGenerationRef.current += 1;
     historyLoadedRef.current = false;
     historyStaleRef.current = true;
@@ -1160,6 +1185,7 @@ export function EnhancementReporterDialog({
     setDiscovering(true);
     void client.discover().then((discovery) => {
       if (cancelled) return;
+      setAllUsersAllowed(allUsersHistoryAllowed(discovery));
       const reporting = discovery?.enhancement_reporting;
       const capabilities = reporting?.history || null;
       const accessTier = reporting?.access_level || reporting?.policy?.tier;
@@ -1203,6 +1229,7 @@ export function EnhancementReporterDialog({
     });
     return () => {
       cancelled = true;
+      historyAbortRef.current?.abort();
       historyGenerationRef.current += 1;
       historyLoadingRef.current = false;
       historyDiscoveryReadyRef.current = false;
@@ -1557,7 +1584,7 @@ export function EnhancementReporterDialog({
     : historySummary?.in_progress ?? historyCountFor("in_progress");
   const planReadyCount = historySummary?.awaiting_team ?? history.filter((request) => request.status === "proposal_ready" || request.status === "backlog").length;
   const needsYouCount = historySummary?.awaiting_user ?? history.filter((request) => request.status === "needs_clarification").length;
-  const dialogHeading = tab === "history" ? "My requests" : heading;
+  const dialogHeading = tab === "history" ? (historyAudience === "all" ? "All users’ requests" : "My requests") : heading;
   const dialogDescription = tab === "history"
     ? "Follow each request from suggestion through delivery."
     : "Describe the improvement and review the attached context before sending.";
@@ -1579,6 +1606,10 @@ export function EnhancementReporterDialog({
     </div>
 
     <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap", marginBottom: 10 }}>
+      <div role="group" aria-label="Enhancement history reporters">
+        <button type="button" aria-pressed={historyAudience === "mine"} style={{ ...styles.tab, ...(historyAudience === "mine" ? styles.selectedControl : {}) }} onClick={() => { setHistoryAudience("mine"); void loadHistory(0, { ...currentHistoryQuery(), audience: "mine" }); }}>Mine</button>
+        {allUsersAllowed && <button type="button" aria-pressed={historyAudience === "all"} style={{ ...styles.tab, ...(historyAudience === "all" ? styles.selectedControl : {}) }} onClick={() => { setHistoryAudience("all"); void loadHistory(0, { ...currentHistoryQuery(), audience: "all" }); }}>All users</button>}
+      </div>
       {Boolean(historyCapabilities?.visibilities.length) && <div role="group" aria-label="Enhancement visibility" style={{ display: "flex", gap: 2, padding: 2, border: "1px solid var(--handrail-enhancement-border)", borderRadius: 9, background: "var(--handrail-enhancement-surface-muted)" }}>
         {historyCapabilities!.visibilities.map((visibility) => <button
           key={visibility}
@@ -1592,7 +1623,7 @@ export function EnhancementReporterDialog({
     </div>
 
     {(historyCapabilities?.search || historyCapabilities?.status_groups.length || historyCapabilities?.sorts.length) && <div style={styles.historyControls}>
-      {historyCapabilities?.search && <input aria-label="Search my requests" autoComplete="off" maxLength={200} type="search" value={historySearch} onChange={(event) => searchHistory(event.target.value)} placeholder="Search title or app version…" style={{ ...styles.input, flex: "1 1 320px", minWidth: 0 }} />}
+      {historyCapabilities?.search && <input aria-label={historyAudience === "all" ? "Search all users’ requests" : "Search my requests"} autoComplete="off" maxLength={200} type="search" value={historySearch} onChange={(event) => searchHistory(event.target.value)} placeholder={historyAudience === "all" ? "Search title or description…" : "Search title or app version…"} style={{ ...styles.input, flex: "1 1 320px", minWidth: 0 }} />}
       {Boolean(historyCapabilities?.status_groups.length) && <button type="button" aria-expanded={historyFiltersVisible} onClick={() => setHistoryFiltersVisible((current) => !current)} style={{ ...buttonStyle("secondary"), flex: "0 0 auto", ...(historyFiltersVisible ? styles.selectedControl : {}) }}>Filters</button>}
       {Boolean(historyCapabilities?.sorts.length) && <select aria-label="Enhancement sort order" value={historySort} onChange={(event) => {
         const next = event.target.value as EnhancementHistorySort;

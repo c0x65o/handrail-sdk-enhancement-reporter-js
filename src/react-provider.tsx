@@ -17,10 +17,13 @@ export interface EnhancementReporterProviderProps {
   readonly children: ReactNode;
   readonly client?: EnhancementReporterClient;
   readonly config?: EnhancementReporterConfig;
+  /** Non-secret revision changed on sign-out, account or tenant switch. */
+  readonly sessionKey?: string | number;
 }
 
 export function EnhancementReporterProvider({
   children,
+  sessionKey,
   client,
   config,
 }: EnhancementReporterProviderProps) {
@@ -37,7 +40,7 @@ export function EnhancementReporterProvider({
       config?.fetch,
     ],
   );
-  return <ReporterContext.Provider value={value}>{children}</ReporterContext.Provider>;
+  return <ReporterContext.Provider key={sessionKey} value={value}>{children}</ReporterContext.Provider>;
 }
 
 export function useOptionalEnhancementReporter(): EnhancementReporterClient | null {

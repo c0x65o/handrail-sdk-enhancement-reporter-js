@@ -250,3 +250,22 @@ test("headless history exposes UI counts, filters, restore, and bulk succeeded d
   assert.equal(calls[2].url, "/api/handrail-enhancements/requests/dismiss-succeeded");
   assert.equal(calls[2].init.method, "POST");
 });
+
+test('All users history discovers fresh verified policy and aborts stale responses', async () => {
+  let allowed = false, authenticated = true, requests = 0, release;
+  const reporter = createEnhancementReporter({ fetch: async (url) => {
+    if (String(url).endsWith('/policy')) return new Response(JSON.stringify({ contract_version: 'v1', principal: { authenticated, authentication_method: 'known_users_direct_session' }, enhancement_reporting: { history: { enabled: true, all_users: allowed } } }));
+    requests++;
+    assert.match(String(url), /audience=all/);
+    if (release === 'wait') await new Promise(resolve => { release = resolve; });
+    return new Response(JSON.stringify({ contract_version: 'v1', requests: [], pagination: { limit: 20, total: 0, offset: 0, has_more: false } }));
+  } });
+  await assert.rejects(reporter.list({ audience: 'all' })); assert.equal(requests, 0);
+  allowed = true; await reporter.list({ audience: 'all' }); assert.equal(requests, 1);
+  authenticated = false; await assert.rejects(reporter.list({ audience: 'all' })); assert.equal(requests, 1);
+  authenticated = true; allowed = false; await assert.rejects(reporter.lookup('other', { audience: 'all' }));
+  allowed = true; release = 'wait'; const controller = new AbortController();
+  const pending = reporter.list({ audience: 'all', signal: controller.signal });
+  while (typeof release !== 'function') await new Promise(resolve => setTimeout(resolve, 1));
+  controller.abort(); release(); await assert.rejects(pending, /cancelled/);
+});

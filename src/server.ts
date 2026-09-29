@@ -6,7 +6,7 @@ export interface EnhancementTransportClient {
   submit(input: Record<string, unknown>): Promise<any>;
   subscribe?(input: { request_id: string; reporter_notification: Record<string, unknown> }): Promise<any>;
   list(input?: Record<string, unknown>): Promise<any>;
-  lookup(input: { request_id: string }): Promise<any>;
+  lookup(input: { request_id: string; audience?: "mine" | "all" }): Promise<any>;
   releaseStatus(input: { request_id: string }): Promise<any>;
   dismiss(input: { request_id: string }): Promise<any>;
   restore(input: { request_id: string }): Promise<any>;
@@ -212,9 +212,10 @@ export function createEnhancementTransportClient(
       if (input.status_group || input.statusGroup) query.set("status_group", String(input.status_group || input.statusGroup));
       if (input.sort) query.set("sort", String(input.sort));
       if (input.visibility) query.set("visibility", String(input.visibility));
+      if (input.audience === "all") query.set("audience", "all");
       return request(`requests${query.size ? `?${query.toString()}` : ""}`);
     },
-    lookup: ({ request_id }: { request_id: string }) => request(`requests/${encodeURIComponent(request_id)}`),
+    lookup: ({ request_id, audience }: { request_id: string; audience?: "mine" | "all" }) => request(`requests/${encodeURIComponent(request_id)}${audience === "all" ? "?audience=all" : ""}`),
     releaseStatus: ({ request_id }: { request_id: string }) => request(`requests/${encodeURIComponent(request_id)}/release-status`),
     dismiss: ({ request_id }: { request_id: string }) => request(`requests/${encodeURIComponent(request_id)}/dismiss`, { method: "POST", payload: {} }),
     restore: ({ request_id }: { request_id: string }) => request(`requests/${encodeURIComponent(request_id)}/dismiss`, { method: "DELETE" }),
@@ -398,6 +399,7 @@ export function createSameOriginEnhancementReporterHandler<RequestType extends R
           status_group: url.searchParams.get("status_group") || url.searchParams.get("statusGroup") || undefined,
           sort: url.searchParams.get("sort") || undefined,
           visibility: url.searchParams.get("visibility") || undefined,
+          ...(url.searchParams.get("audience") === "all" ? { audience: "all" } : {}),
         }));
       }
       if (request.method === "POST" && parts.length === 2 && parts[0] === "requests" && parts[1] === "dismiss-succeeded") {
@@ -406,7 +408,7 @@ export function createSameOriginEnhancementReporterHandler<RequestType extends R
       if (parts[0] === "requests" && parts.length >= 2) {
         const requestId = decodePathPart(parts[1]);
         if (!requestId) return json(404, { error: "Enhancement request not found.", code: "enhancement_request_not_found" });
-        if (request.method === "GET" && parts.length === 2) return json(200, await client.lookup({ request_id: requestId }));
+        if (request.method === "GET" && parts.length === 2) return json(200, await client.lookup({ request_id: requestId, ...(new URL(request.url).searchParams.get("audience") === "all" ? { audience: "all" as const } : {}) }));
         if (request.method === "GET" && parts.length === 3 && parts[2] === "release-status") return json(200, await client.releaseStatus({ request_id: requestId }));
         if (request.method === "POST" && parts.length === 3 && parts[2] === "dismiss") return json(200, await client.dismiss({ request_id: requestId }));
         if (request.method === "POST" && parts.length === 3 && parts[2] === "subscription") {
