@@ -1061,6 +1061,8 @@ function EnhancementSessionDialog({
   const [loadingHistory, setLoadingHistory] = useState(false);
   const [busyHistoryId, setBusyHistoryId] = useState<string | null>(null);
   const [expandedRequestId, setExpandedRequestId] = useState<string | null>(null);
+  const readingHistoryRef = useRef(false);
+  readingHistoryRef.current = expandedRequestId !== null;
   const [historyImagePreview, setHistoryImagePreview] = useState<{
     readonly images: readonly PreviewableImage[];
     readonly activeIndex: number;
@@ -1108,6 +1110,7 @@ function EnhancementSessionDialog({
   const loadHistory = useCallback(async (
     offset = 0,
     query: EnhancementHistoryListOptions = currentHistoryQuery(),
+    background = false,
   ) => {
     historyAbortRef.current?.abort();
     const controller = new AbortController();
@@ -1116,8 +1119,10 @@ function EnhancementSessionDialog({
     historyStaleRef.current = true;
     historyLoadingRef.current = true;
     setLoadingHistory(true);
-    if (offset === 0) { setHistory([]); setHistorySummary(null); setHistoryTotal(0); }
-    setExpandedRequestId(null); setHistoryImagePreview(null);
+    if (!background) {
+      if (offset === 0) { setHistory([]); setHistorySummary(null); setHistoryTotal(0); }
+      setExpandedRequestId(null); setHistoryImagePreview(null);
+    }
     setError(null);
     try {
       const page = await client.list({ limit: pageSize, offset, ...query, signal: controller.signal });
@@ -1289,7 +1294,7 @@ function EnhancementSessionDialog({
   useEffect(() => {
     if (!open || tab !== "history") return undefined;
     const interval = setInterval(() => {
-      if (!historyLoadingRef.current) void loadHistory(0);
+      if (!historyLoadingRef.current && !readingHistoryRef.current) void loadHistory(0, undefined, true);
     }, HISTORY_REFRESH_INTERVAL_MS);
     return () => clearInterval(interval);
   }, [loadHistory, open, tab]);

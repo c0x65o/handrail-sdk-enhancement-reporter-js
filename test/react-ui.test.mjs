@@ -661,6 +661,8 @@ test("My requests previews attachments only through the principal-scoped client 
 
 test("My requests refreshes every 15 seconds while the history view stays open", async () => {
   let listCalls = 0;
+  let releasePoll;
+  let holdPoll = false;
   const sdk = client(async () => discovery({
     history: {
       enabled: true,
@@ -673,6 +675,7 @@ test("My requests refreshes every 15 seconds while the history view stays open",
     },
   }));
   sdk.list = async (options) => {
+    if (holdPoll) await new Promise((resolve) => { releasePoll = resolve; });
     listCalls += 1;
     return {
       contract_version: "v1",
@@ -722,15 +725,23 @@ test("My requests refreshes every 15 seconds while the history view stays open",
     assert.equal(typeof intervalCallback, "function");
     const callsBeforePoll = listCalls;
 
-    await act(async () => {
-      intervalCallback();
-      await new Promise((resolve) => setTimeout(resolve, 0));
-    });
+    holdPoll = true;
+    await act(async () => { intervalCallback(); });
+    assert.equal(renderer.root.findAllByProps({ "aria-label": `View Polled request ${listCalls}` }).length, 1,
+      "background refresh must keep the current row mounted");
+    await act(async () => { releasePoll(); });
+    holdPoll = false;
 
     assert.equal(listCalls, callsBeforePoll + 1);
     assert.equal(renderer.root.findAllByProps({
       "aria-label": `View Polled request ${listCalls}`,
     }).length, 1);
+    const view = renderer.root.findByProps({ "aria-label": `View Polled request ${listCalls}` });
+    await act(async () => view.props.onClick());
+    const callsWhileReading = listCalls;
+    await act(async () => { intervalCallback(); });
+    assert.equal(listCalls, callsWhileReading, "polling pauses while reading a request");
+    assert.equal(renderer.root.findByProps({ "aria-label": `View Polled request ${listCalls}` }).props["aria-expanded"], true);
     await act(async () => renderer.root.findByProps({ "data-handrail-enhancement-view-switch": "new" }).props.onClick());
     assert.equal(intervalCleared, true);
   } finally {
