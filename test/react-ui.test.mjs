@@ -774,3 +774,240 @@ test('All users is verified-policy-only, read-only, and session changes cancel o
   assert.equal(renderer.root.findAllByProps({ 'aria-label': 'View Bob report' }).length, 0);
   await act(async () => renderer.unmount());
 });
+
+const clarificationHistory = {
+  enabled: true,
+  search: false,
+  status_groups: ["needs_attention"],
+  sorts: ["newest"],
+  visibilities: ["active"],
+  restore: false,
+  dismiss_succeeded: false,
+};
+
+function clarificationRequest(informationRequest = {}) {
+  return {
+    id: "enh-question",
+    title: "Export filters",
+    description: "Exports should respect my filters.",
+    status: "needs_clarification",
+    status_group: "needs_attention",
+    terminal: false,
+    dismissed: false,
+    dismissed_at: null,
+    created_at: "2026-11-18T00:00:00Z",
+    information_request: {
+      id: "ir-1",
+      current_behavior: "Exports include every row in the project.",
+      question: "Which rows should the export include?",
+      options: ["Only rows matching my filters", "Every row, with a filter summary", "Ask me each time"],
+      allows_written_answer: true,
+      asked_at: "2026-11-18T01:00:00Z",
+      response_allowed: true,
+      grants_implementation_authority: false,
+      ...informationRequest,
+    },
+  };
+}
+
+async function openClarificationHistory(sdk) {
+  let renderer;
+  await act(async () => {
+    renderer = create(createElement(EnhancementReporterDialog, { open: true, onClose() {}, client: sdk }));
+  });
+  await act(async () => {
+    renderer.root.findByProps({ "data-handrail-enhancement-view-switch": "history" }).props.onClick();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  return renderer;
+}
+
+const answerCard = (renderer) => renderer.root.findAllByProps({ "data-handrail-enhancement-information-request": "true" }).find((node) => node.type === "form");
+const sendButton = (renderer) => answerCard(renderer).findAll((node) => node.type === "button" && node.props.type === "submit")[0];
+
+test("My requests shows an answer card for information requests and sends a choice with a written answer", async () => {
+  let answered = false;
+  const answerCalls = [];
+  const listCalls = [];
+  const sdk = client(async () => discovery({ history: clarificationHistory }));
+  sdk.list = async (options) => {
+    listCalls.push(options);
+    const request = answered
+      ? { ...clarificationRequest(), status: "assessing", status_group: "in_progress", information_request: null }
+      : clarificationRequest();
+    return {
+      contract_version: "v1",
+      requests: [request],
+      pagination: { limit: options.limit, offset: 0, total: 1, has_more: false },
+      summary: { total: 1, needs_attention: answered ? 0 : 1, in_progress: answered ? 1 : 0, succeeded: 0, closed: 0, awaiting_user: answered ? 0 : 1 },
+    };
+  };
+  sdk.answerInformationRequest = async (requestId, input) => {
+    answerCalls.push([requestId, { ...input, signal: input.signal instanceof AbortSignal }]);
+    answered = true;
+    return { contract_version: "v1", answered: true, replayed: false, information_request_id: input.informationRequestId, assessment_id: "assessment-2", assessment_status: "queued", warning: null, implementation_authority: false, deployment_authority: false };
+  };
+  const renderer = await openClarificationHistory(sdk);
+
+  const card = answerCard(renderer);
+  assert.ok(card, "the answer card renders without expanding the row");
+  assert.equal(renderer.root.findAllByProps({ "data-handrail-enhancement-history-detail": "true" }).length, 0);
+  const text = renderedText(card);
+  assert.match(text, /Needs your input/u);
+  assert.match(text, /What it does today/u);
+  assert.match(text, /Exports include every row in the project\./u);
+  assert.match(text, /Which rows should the export include\?/u);
+  assert.match(text, /Or write your own answer/u);
+  const choices = card.findByProps({ "aria-label": "Answer choices" }).findAllByType("button");
+  assert.deepEqual(choices.map((choice) => choice.props["aria-label"]), [
+    "A. Only rows matching my filters",
+    "B. Every row, with a filter summary",
+    "C. Ask me each time",
+  ]);
+  assert.equal(sendButton(renderer).props.disabled, true);
+
+  await act(async () => choices[1].props.onClick());
+  assert.equal(answerCard(renderer).findByProps({ "aria-label": "B. Every row, with a filter summary" }).props["aria-pressed"], true);
+  assert.equal(sendButton(renderer).props.disabled, false);
+  await act(async () => answerCard(renderer).findByProps({ "aria-label": "B. Every row, with a filter summary" }).props.onClick());
+  assert.equal(answerCard(renderer).findByProps({ "aria-label": "B. Every row, with a filter summary" }).props["aria-pressed"], false);
+  assert.equal(sendButton(renderer).props.disabled, true, "choices toggle off");
+
+  await act(async () => answerCard(renderer).findByType("textarea").props.onChange({ target: { value: "   " } }));
+  assert.equal(sendButton(renderer).props.disabled, true, "whitespace is not an answer");
+  await act(async () => answerCard(renderer).findByType("textarea").props.onChange({ target: { value: "Include the filter names in the file." } }));
+  assert.equal(sendButton(renderer).props.disabled, false, "a written answer alone can be sent");
+  await act(async () => answerCard(renderer).findByProps({ "aria-label": "A. Only rows matching my filters" }).props.onClick());
+
+  const listCallsBeforeSend = listCalls.length;
+  await act(async () => {
+    answerCard(renderer).props.onSubmit({ preventDefault() {} });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  assert.deepEqual(answerCalls, [["enh-question", {
+    informationRequestId: "ir-1",
+    option: "Only rows matching my filters",
+    answer: "Include the filter names in the file.",
+    signal: true,
+  }]]);
+  assert.equal(listCalls.length, listCallsBeforeSend + 1, "history refreshes after a successful answer");
+  assert.equal(answerCard(renderer), undefined, "the answered row no longer asks for input");
+  assert.equal(renderer.root.findAllByProps({ "data-handrail-enhancement-history-row": "true" }).length, 1);
+  await act(async () => renderer.unmount());
+});
+
+test("an answer card shows the server error inline and keeps the reporter's input", async () => {
+  const sdk = client(async () => discovery({ history: clarificationHistory }));
+  sdk.list = async (options) => ({
+    contract_version: "v1",
+    requests: [clarificationRequest({ options: [] , current_behavior: null })],
+    pagination: { limit: options.limit, offset: 0, total: 1, has_more: false },
+    summary: null,
+  });
+  let attempts = 0;
+  sdk.answerInformationRequest = async () => {
+    attempts += 1;
+    throw Object.assign(new Error(attempts === 1 ? "Answers must be 4000 characters or fewer." : "This question is no longer open."), {
+      code: attempts === 1 ? "information_request_answer_invalid" : "information_request_closed",
+      statusCode: attempts === 1 ? 400 : 409,
+    });
+  };
+  const renderer = await openClarificationHistory(sdk);
+  const card = answerCard(renderer);
+  assert.doesNotMatch(renderedText(card), /What it does today/u);
+  assert.equal(card.findAllByProps({ "aria-label": "Answer choices" }).length, 0);
+  assert.match(renderedText(card), /Your answer/u);
+  await act(async () => answerCard(renderer).findByType("textarea").props.onChange({ target: { value: "Only filtered rows." } }));
+  await act(async () => {
+    answerCard(renderer).props.onSubmit({ preventDefault() {} });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  const alert = answerCard(renderer).findByProps({ role: "alert" });
+  assert.equal(renderedText(alert), "Answers must be 4000 characters or fewer.");
+  assert.equal(answerCard(renderer).findByType("textarea").props.value, "Only filtered rows.");
+  assert.equal(sendButton(renderer).props.disabled, false, "a fixable error can be retried");
+
+  await act(async () => {
+    answerCard(renderer).props.onSubmit({ preventDefault() {} });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  assert.equal(renderedText(answerCard(renderer).findByProps({ role: "alert" })), "This question is no longer open.");
+  assert.equal(answerCard(renderer).findAllByType("textarea").length, 0, "a closed question no longer accepts input");
+  assert.equal(attempts, 2);
+  await act(async () => renderer.unmount());
+});
+
+test("an answer card is read-only when this app cannot send answers", async () => {
+  let answerCalls = 0;
+  const sdk = client(async () => discovery({ history: clarificationHistory }));
+  sdk.list = async (options) => ({
+    contract_version: "v1",
+    requests: [clarificationRequest({ response_allowed: false })],
+    pagination: { limit: options.limit, offset: 0, total: 1, has_more: false },
+    summary: null,
+  });
+  sdk.answerInformationRequest = async () => { answerCalls += 1; };
+  const renderer = await openClarificationHistory(sdk);
+  const card = answerCard(renderer);
+  const text = renderedText(card);
+  assert.match(text, /Which rows should the export include\?/u);
+  assert.match(text, /Answers can’t be sent from this app yet\./u);
+  assert.equal(card.findAllByType("textarea").length, 0);
+  assert.equal(card.findAll((node) => node.type === "button" && node.props.type === "submit").length, 0);
+  assert.ok(card.findByProps({ "aria-label": "Answer choices" }).findAllByType("button").every((choice) => choice.props.disabled === true));
+  await act(async () => card.props.onSubmit({ preventDefault() {} }));
+  assert.equal(answerCalls, 0);
+  await act(async () => renderer.unmount());
+});
+
+test("background refresh pauses while an answer card has unsent input and keeps the draft", async () => {
+  let listCalls = 0;
+  const sdk = client(async () => discovery({ history: clarificationHistory }));
+  sdk.list = async (options) => {
+    listCalls += 1;
+    return {
+      contract_version: "v1",
+      requests: [clarificationRequest()],
+      pagination: { limit: options.limit, offset: 0, total: 1, has_more: false },
+      summary: null,
+    };
+  };
+  sdk.answerInformationRequest = async () => { throw new Error("not used"); };
+  let renderer;
+  await act(async () => {
+    renderer = create(createElement(EnhancementReporterDialog, { open: true, onClose() {}, client: sdk }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  const originalSetInterval = globalThis.setInterval;
+  const originalClearInterval = globalThis.clearInterval;
+  let intervalCallback;
+  globalThis.setInterval = (callback) => { intervalCallback = callback; return 15_000; };
+  globalThis.clearInterval = () => undefined;
+  try {
+    await act(async () => {
+      renderer.root.findByProps({ "data-handrail-enhancement-view-switch": "history" }).props.onClick();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    const idle = listCalls;
+    await act(async () => { intervalCallback(); await new Promise((resolve) => setTimeout(resolve, 0)); });
+    assert.equal(listCalls, idle + 1, "an untouched card does not pause refresh");
+
+    await act(async () => answerCard(renderer).findByProps({ "aria-label": "C. Ask me each time" }).props.onClick());
+    await act(async () => answerCard(renderer).findByType("textarea").props.onChange({ target: { value: "Remember my last choice." } }));
+    const typing = listCalls;
+    await act(async () => { intervalCallback(); await new Promise((resolve) => setTimeout(resolve, 0)); });
+    assert.equal(listCalls, typing, "refresh pauses while an answer is unsent");
+
+    await act(async () => {
+      renderer.root.findAllByType("form")[0].props.onSubmit({ preventDefault() {} });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    assert.equal(listCalls, typing + 1);
+    assert.equal(answerCard(renderer).findByType("textarea").props.value, "Remember my last choice.", "a reload keeps the draft keyed by question id");
+    assert.equal(answerCard(renderer).findByProps({ "aria-label": "C. Ask me each time" }).props["aria-pressed"], true);
+  } finally {
+    globalThis.setInterval = originalSetInterval;
+    globalThis.clearInterval = originalClearInterval;
+    await act(async () => renderer.unmount());
+  }
+});

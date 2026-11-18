@@ -21,7 +21,7 @@ export type {
 } from "./react-ui";
 
 export { reporterIdentity } from "./identity";
-export { createEnhancementReporter } from "./reporter";
+export { createEnhancementReporter, enhancementInformationRequest } from "./reporter";
 export {
   ENHANCEMENT_HISTORY_SORTS,
   ENHANCEMENT_HISTORY_STATUS_GROUPS,
@@ -44,6 +44,9 @@ export type {
   EnhancementHistoryStatusGroup,
   EnhancementHistorySummary,
   EnhancementHistoryVisibility,
+  EnhancementInformationRequest,
+  EnhancementInformationRequestAnswer,
+  EnhancementInformationRequestAnswerResult,
   EnhancementReporterClient,
   EnhancementReporterConfig,
   EnhancementReporterDiscovery,

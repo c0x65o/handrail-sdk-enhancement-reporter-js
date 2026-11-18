@@ -131,6 +131,11 @@ export interface EnhancementReporterDiscovery {
     readonly role?: EnhancementAutomationRole | null;
     readonly history?: EnhancementHistoryCapabilities;
     readonly policy?: EnhancementReporterPolicy;
+    readonly workflow?: {
+      /** True when this app's credential may answer information requests. */
+      readonly clarification_response?: boolean;
+      readonly [key: string]: unknown;
+    };
   };
   readonly reporter_notifications?: {
     readonly available?: boolean;
@@ -164,6 +169,12 @@ export interface EnhancementRequestRecord {
   }[];
   readonly delivery_journey?: EnhancementDeliveryJourney | null;
   readonly release_tracking?: EnhancementReleaseTracking | null;
+  /**
+   * One structured question for the reporter. Present only while
+   * `status === "needs_clarification"` on the reporter's own requests; missing
+   * or malformed values are normalized to null.
+   */
+  readonly information_request?: EnhancementInformationRequest | null;
   readonly dismissed_at: string | null;
   readonly dismissed: boolean;
   readonly created_at?: string;
@@ -171,7 +182,44 @@ export interface EnhancementRequestRecord {
   readonly [key: string]: unknown;
 }
 
-export type EnhancementDeliveryJourneyState = "active" | "waiting" | "succeeded" | "closed" | "blocked";
+export const MAX_INFORMATION_REQUEST_ANSWER_LENGTH = 4_000;
+
+export interface EnhancementInformationRequest {
+  readonly id: string;
+  /** What the product does today, when Handrail supplied it. */
+  readonly current_behavior: string | null;
+  readonly question: string;
+  /** Zero, or two through four, choices. A written answer is always allowed. */
+  readonly options: readonly string[];
+  readonly allows_written_answer: true;
+  readonly asked_at: string | null;
+  /** False when this application's credential cannot send answers. */
+  readonly response_allowed: boolean;
+  readonly grants_implementation_authority: false;
+}
+
+export interface EnhancementInformationRequestAnswer {
+  readonly informationRequestId: string;
+  /** Must exactly match one of the information request's options. */
+  readonly option?: string;
+  /** Written answer, up to 4000 characters. */
+  readonly answer?: string;
+  readonly signal?: AbortSignal;
+}
+
+export interface EnhancementInformationRequestAnswerResult {
+  readonly contract_version: "v1";
+  readonly answered: true;
+  readonly replayed: boolean;
+  readonly information_request_id: string;
+  readonly assessment_id: string | null;
+  readonly assessment_status: string | null;
+  readonly warning: { readonly code: string; readonly message: string } | null;
+  readonly implementation_authority: false;
+  readonly deployment_authority: false;
+}
+
+export type EnhancementDeliveryJourneyState ="active" | "waiting" | "succeeded" | "closed" | "blocked";
 export type EnhancementDeliveryMilestoneState = "pending" | "active" | "waiting" | "completed" | "blocked" | "skipped";
 
 export interface EnhancementDeliveryMilestone {
@@ -384,6 +432,39 @@ export function enhancementReleaseSummary(request: Pick<EnhancementRequestRecord
   });
 }
 
+/**
+ * Returns the record's answerable information request, or null when the record
+ * is not waiting on its reporter or the field is missing or malformed.
+ */
+export function enhancementInformationRequest(
+  request: Pick<EnhancementRequestRecord, "status" | "is_owner" | "information_request"> | null | undefined,
+): EnhancementInformationRequest | null {
+  if (!request || request.status !== "needs_clarification" || request.is_owner === false) return null;
+  const source = record(request.information_request);
+  if (!source) return null;
+  const id = clean(source.id, 160);
+  const question = clean(source.question, 20_000);
+  if (!id || !question || !Array.isArray(source.options)) return null;
+  const options = source.options.map((option: unknown) => (typeof option === "string" && option.trim() ? option : null));
+  if (options.includes(null) || options.length === 1 || options.length > 4 || new Set(options).size !== options.length) return null;
+  return Object.freeze({
+    id,
+    current_behavior: clean(source.current_behavior, 20_000) || null,
+    question,
+    options: Object.freeze(options as string[]),
+    allows_written_answer: true,
+    asked_at: clean(source.asked_at, 80) || null,
+    response_allowed: source.response_allowed === true,
+    grants_implementation_authority: false,
+  });
+}
+
+function normalizeRequestRecord<T>(value: T): T {
+  const source = record(value);
+  if (!source) return value;
+  return { ...source, information_request: enhancementInformationRequest(source as EnhancementRequestRecord) } as T;
+}
+
 function endpointPath(value: unknown): string {
   const path = clean(value || "/api/handrail-enhancements", 2_000).replace(/\/+$/u, "");
   if (!path.startsWith("/") || path.startsWith("//") || path.includes("?") || path.includes("#")) {
@@ -506,6 +587,8 @@ export interface EnhancementReporterClient {
   restore(requestId: string): Promise<EnhancementRestoreResult>;
   dismissSucceeded(): Promise<EnhancementDismissSucceededResult>;
   cancel(requestId: string, reason?: string): Promise<EnhancementRequestRecord>;
+  /** Answer the request's open information request with a choice, a written answer, or both. */
+  answerInformationRequest(requestId: string, input: EnhancementInformationRequestAnswer): Promise<EnhancementInformationRequestAnswerResult>;
   attachmentUrl(requestId: string, attachmentId: string): string;
 }
 
@@ -534,9 +617,9 @@ export function createEnhancementReporter(config: EnhancementReporterConfig = {}
       credentials: "same-origin",
       headers: { accept: "application/json", ...(init.body ? { "content-type": "application/json" } : {}), ...init.headers },
     });
-    if (init.signal?.aborted) throw new EnhancementReporterError("request_cancelled", "History request was cancelled.");
+    if (init.signal?.aborted) throw new EnhancementReporterError("request_cancelled", "The request was cancelled.");
     const body = await responseJson(response);
-    if (init.signal?.aborted) throw new EnhancementReporterError("request_cancelled", "History request was cancelled.");
+    if (init.signal?.aborted) throw new EnhancementReporterError("request_cancelled", "The request was cancelled.");
     return body;
   };
 
@@ -590,7 +673,7 @@ export function createEnhancementReporter(config: EnhancementReporterConfig = {}
       const images = await normalizeEnhancementImages(input.images);
       const route = clean(input.context?.route, 2_000) || (typeof location !== "undefined" ? `${location.pathname}${location.search}` : "");
       const viewport = clean(input.context?.viewport, 80) || (typeof window !== "undefined" ? `${window.innerWidth}x${window.innerHeight}` : "");
-      const result = await request("", {
+      const accepted = await request("", {
         method: "POST",
         body: JSON.stringify({
           idempotency_key: clean(input.idempotencyKey, 255) || randomId(),
@@ -608,6 +691,7 @@ export function createEnhancementReporter(config: EnhancementReporterConfig = {}
           attachments: images.map(({ mime_type: _mime, size_bytes: _size, ...image }) => image),
         }),
       });
+      const result = record(accepted) && accepted.request ? { ...accepted, request: normalizeRequestRecord(accepted.request) } : accepted;
       if (input.notification?.notifyOnResolution !== true) return result;
       const requestId = clean(result?.request?.id, 160);
       if (!requestId) {
@@ -638,17 +722,41 @@ export function createEnhancementReporter(config: EnhancementReporterConfig = {}
       if (sort) query.set("sort", sort);
       if (visibility) query.set("visibility", visibility);
       if (options.audience === "all") query.set("audience", "all");
-      return request(`?${query.toString()}`, { signal: options.signal });
+      const page = await request(`?${query.toString()}`, { signal: options.signal });
+      return record(page) && Array.isArray(page.requests)
+        ? { ...page, requests: page.requests.map(normalizeRequestRecord) }
+        : page;
     },
     async lookup(requestId: string, options: { audience?: "mine" | "all"; signal?: AbortSignal } = {}) {
       if (options.audience === "all") await requireSharing(options.signal);
-      return request(`/requests/${encodeURIComponent(requestId)}${options.audience === "all" ? "?audience=all" : ""}`, { signal: options.signal });
+      return normalizeRequestRecord(await request(`/requests/${encodeURIComponent(requestId)}${options.audience === "all" ? "?audience=all" : ""}`, { signal: options.signal }));
     },
     releaseStatus(requestId: string) { return request(`/requests/${encodeURIComponent(requestId)}/release-status`); },
     dismiss(requestId: string) { return request(`/requests/${encodeURIComponent(requestId)}/dismiss`, { method: "POST", body: "{}" }); },
     restore(requestId: string) { return request(`/requests/${encodeURIComponent(requestId)}/dismiss`, { method: "DELETE" }); },
     dismissSucceeded() { return request("/requests/dismiss-succeeded", { method: "POST", body: "{}" }); },
-    cancel(requestId: string, reason?: string) { return request(`/requests/${encodeURIComponent(requestId)}/cancel`, { method: "POST", body: JSON.stringify({ reason: clean(reason, 2_000) || null }) }); },
+    async cancel(requestId: string, reason?: string) { return normalizeRequestRecord(await request(`/requests/${encodeURIComponent(requestId)}/cancel`, { method: "POST", body: JSON.stringify({ reason: clean(reason, 2_000) || null }) })); },
+    async answerInformationRequest(requestId: string, input: EnhancementInformationRequestAnswer) {
+      const id = clean(requestId, 160);
+      const informationRequestId = clean(input?.informationRequestId, 160);
+      const option = typeof input?.option === "string" && input.option.trim() ? input.option : undefined;
+      const answer = typeof input?.answer === "string" ? input.answer.trim() : "";
+      if (!id || !informationRequestId || (!option && !answer)) {
+        throw new EnhancementReporterError("information_request_answer_invalid", "Choose an answer or write one before sending.");
+      }
+      if (answer.length > MAX_INFORMATION_REQUEST_ANSWER_LENGTH) {
+        throw new EnhancementReporterError("information_request_answer_invalid", `Answers must be ${MAX_INFORMATION_REQUEST_ANSWER_LENGTH} characters or fewer.`);
+      }
+      return request(`/requests/${encodeURIComponent(id)}/clarifications`, {
+        method: "POST",
+        signal: input.signal,
+        body: JSON.stringify({
+          information_request_id: informationRequestId,
+          ...(option ? { option } : {}),
+          ...(answer ? { answer } : {}),
+        }),
+      });
+    },
     attachmentUrl(requestId: string, attachmentId: string) { return `${endpoint}/requests/${encodeURIComponent(requestId)}/attachments/${encodeURIComponent(attachmentId)}`; },
   });
 }

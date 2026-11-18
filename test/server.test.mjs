@@ -39,6 +39,10 @@ function setup(session = "session-1") {
         },
       };
     },
+    answerInformationRequest: async (input) => {
+      calls.push(["answerInformationRequest", input]);
+      return { contract_version: "v1", answered: true, replayed: false, information_request_id: input.information_request_id, assessment_id: "assessment-2", assessment_status: "queued", warning: null, implementation_authority: false, deployment_authority: false };
+    },
     submit: async (input) => { calls.push(["submit", input]); return { request: { id: "enhancement-1", status: "received", terminal: false, linked_work_request: null }, replayed: false }; },
     downloadAttachment: async () => ({ data: Uint8Array.from([1, 2, 3]), filename: "screen.png", mime_type: "image/png", size_bytes: 3 }),
   };
@@ -249,4 +253,84 @@ test("cross-site submissions are rejected before session resolution", async () =
   const response = await handler(new Request("https://app.example/api/handrail-enhancements", { headers: { origin: "https://evil.example" } }));
   assert.equal(response.status, 403);
   assert.equal(resolved.length, 0);
+});
+
+function answerRequest(body, { method = "POST", path = "requests/enhancement-1/clarifications" } = {}) {
+  return new Request(`https://app.example/api/handrail-enhancements/${path}`, {
+    method,
+    headers: { "content-type": "application/json", origin: "https://app.example" },
+    ...(method === "GET" ? {} : { body: typeof body === "string" ? body : JSON.stringify(body) }),
+  });
+}
+
+test("handler forwards information request answers with exactly the contract keys", async () => {
+  const { handler, calls } = setup();
+  const response = await handler(answerRequest({ information_request_id: "ir-1", option: "Only visible columns", answer: "  Keep the sort order.  " }));
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).answered, true);
+  assert.deepEqual(calls.at(-1), ["answerInformationRequest", {
+    request_id: "enhancement-1",
+    information_request_id: "ir-1",
+    option: "Only visible columns",
+    answer: "Keep the sort order.",
+  }]);
+  const written = await handler(answerRequest({ information_request_id: "ir-1", option: null, answer: "Only totals." }));
+  assert.equal(written.status, 200);
+  assert.deepEqual(calls.at(-1), ["answerInformationRequest", { request_id: "enhancement-1", information_request_id: "ir-1", answer: "Only totals." }]);
+});
+
+test("handler rejects malformed answers and unknown clarification routes before forwarding", async () => {
+  const { handler, calls } = setup();
+  for (const body of [
+    { information_request_id: "ir-1", answer: "Yes", implementation_authority: true },
+    { information_request_id: "ir-1", answer: "Yes", request_id: "other" },
+    { information_request_id: "ir-1" },
+    { information_request_id: "ir-1", answer: "   " },
+    { information_request_id: "", answer: "Yes" },
+    { answer: "Yes" },
+    { information_request_id: "ir-1", option: 2 },
+    { information_request_id: "ir-1", answer: "x".repeat(4_001) },
+    "not json",
+    [],
+  ]) {
+    const response = await handler(answerRequest(body));
+    assert.equal(response.status, 400, JSON.stringify(body));
+    assert.equal((await response.json()).code, "information_request_answer_invalid");
+  }
+  assert.equal((await handler(answerRequest(null, { method: "GET" }))).status, 405);
+  assert.equal((await handler(answerRequest({ information_request_id: "ir-1", answer: "Yes" }, { method: "PUT" }))).status, 405);
+  assert.equal((await handler(answerRequest({ information_request_id: "ir-1", answer: "Yes" }, { path: "requests/enhancement-1/clarify" }))).status, 405);
+  assert.equal((await handler(answerRequest({ information_request_id: "ir-1", answer: "Yes" }, { path: "requests/enhancement-1/clarifications/extra" }))).status, 405);
+  assert.equal(calls.length, 0);
+});
+
+test("default transport posts answers to Handrail and relays its errors", async () => {
+  const calls = [];
+  let reply = { status: 200, body: { contract_version: "v1", answered: true, replayed: true, information_request_id: "ir-1", assessment_id: null, assessment_status: null, warning: null, implementation_authority: false, deployment_authority: false } };
+  const handler = createSameOriginEnhancementReporterHandler({
+    apiUrl: "https://handrail.example/api/enhancement-reporting/v1",
+    projectId: "project-1",
+    capabilityId: "capability-1",
+    token: "server-secret",
+    resolveApplicationSessionToken: async () => "known-user-session",
+    fetch: async (url, init) => {
+      calls.push({ url, init });
+      return new Response(JSON.stringify(reply.body), { status: reply.status, headers: { "content-type": "application/json" } });
+    },
+  });
+  const response = await handler(answerRequest({ information_request_id: "ir-1", option: "Every column" }));
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).replayed, true);
+  assert.equal(calls[0].url, "https://handrail.example/api/enhancement-reporting/v1/requests/enhancement-1/clarifications");
+  assert.equal(calls[0].init.method, "POST");
+  assert.deepEqual(JSON.parse(calls[0].init.body), { information_request_id: "ir-1", option: "Every column" });
+  assert.equal(calls[0].init.headers.authorization, "Bearer server-secret");
+  assert.equal(calls[0].init.headers["x-handrail-api-contract-version"], "v1");
+  assert.equal(calls[0].init.headers["x-handrail-application-session"], "known-user-session");
+  assert.equal(calls[0].init.headers["content-type"], "application/json");
+
+  reply = { status: 409, body: { error: "This question is no longer open.", code: "information_request_closed" } };
+  const rejected = await handler(answerRequest({ information_request_id: "ir-1", answer: "Yes" }));
+  assert.equal(rejected.status, 409);
+  assert.deepEqual(await rejected.json(), { error: "This question is no longer open.", code: "information_request_closed" });
 });

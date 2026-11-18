@@ -19,6 +19,8 @@ import {
   MAX_ENHANCEMENT_IMAGES,
   MAX_ENHANCEMENT_IMAGE_BYTES,
   MAX_ENHANCEMENT_IMAGE_TOTAL_BYTES,
+  MAX_INFORMATION_REQUEST_ANSWER_LENGTH,
+  enhancementInformationRequest,
   enhancementReleaseSummary,
   allUsersHistoryAllowed,
   type EnhancementHistoryCapabilities,
@@ -30,6 +32,7 @@ import {
   type EnhancementAutomationRole,
   type EnhancementDeliveryMilestone,
   type EnhancementImageInput,
+  type EnhancementInformationRequest,
   type EnhancementPriority,
   type EnhancementReporterClient,
   type EnhancementReporterPolicy,
@@ -192,6 +195,7 @@ const RESPONSIVE_DIALOG_CSS = `
   [data-handrail-enhancement-content="new"] { padding: 12px 14px !important; }
   [data-handrail-enhancement-content="history"] { padding: 12px 14px 0 !important; }
   [data-handrail-enhancement-history-list="true"] { min-height: 150px !important; }
+  [data-handrail-enhancement-answer-actions="true"] > button { flex: 1 1 auto; }
 }
 `;
 
@@ -893,6 +897,136 @@ function JourneyTimeline({ request, expanded = false }: {
   </div>;
 }
 
+interface InformationAnswerDraft {
+  readonly option: string | null;
+  readonly answer: string;
+}
+
+interface InformationAnswerState {
+  readonly draft: InformationAnswerDraft;
+  readonly sending: boolean;
+  readonly sent: boolean;
+  readonly error: string | null;
+  /** The server reported this question as closed, answered elsewhere, or gone. */
+  readonly closed: boolean;
+}
+
+const EMPTY_ANSWER_DRAFT: InformationAnswerDraft = Object.freeze({ option: null, answer: "" });
+const INITIAL_ANSWER_STATE: InformationAnswerState = Object.freeze({
+  draft: EMPTY_ANSWER_DRAFT,
+  sending: false,
+  sent: false,
+  error: null,
+  closed: false,
+});
+
+function answerDraftReady(draft: InformationAnswerDraft): boolean {
+  return draft.option !== null || draft.answer.trim().length > 0;
+}
+
+function InformationRequestCard({
+  request,
+  informationRequest,
+  state,
+  canAnswer,
+  onDraftChange,
+  onSend,
+}: {
+  readonly request: EnhancementRequestRecord;
+  readonly informationRequest: EnhancementInformationRequest;
+  readonly state: InformationAnswerState;
+  readonly canAnswer: boolean;
+  readonly onDraftChange: (informationRequestId: string, draft: InformationAnswerDraft) => void;
+  readonly onSend: (request: EnhancementRequestRecord, informationRequest: EnhancementInformationRequest) => Promise<void>;
+}): ReactElement {
+  const answerId = useId();
+  const { draft, sending, sent, error, closed } = state;
+  const interactive = canAnswer && !sent && !closed;
+  const ready = answerDraftReady(draft) && draft.answer.trim().length <= MAX_INFORMATION_REQUEST_ANSWER_LENGTH;
+  const hasOptions = informationRequest.options.length > 0;
+  const sectionLabel: CSSProperties = { display: "block", marginBottom: 3, color: "var(--handrail-enhancement-muted-text)", fontSize: 10, fontWeight: 800, letterSpacing: "0.06em", textTransform: "uppercase" };
+  const prose: CSSProperties = { margin: 0, whiteSpace: "pre-wrap", overflowWrap: "anywhere" };
+  return <form
+    role="cell"
+    aria-label={`Question about ${request.title}`}
+    data-handrail-enhancement-information-request="true"
+    onSubmit={(event) => {
+      event.preventDefault();
+      if (interactive && ready && !sending) void onSend(request, informationRequest);
+    }}
+    style={{
+      gridColumn: "1 / -1",
+      display: "grid",
+      minWidth: 0,
+      gap: 10,
+      margin: 0,
+      padding: 12,
+      border: "1px solid color-mix(in srgb, var(--handrail-enhancement-warning-text) 30%, transparent)",
+      borderRadius: 10,
+      color: "var(--handrail-enhancement-text)",
+      background: "var(--handrail-enhancement-warning-surface)",
+      fontSize: 12,
+    }}
+  >
+    <span style={{ justifySelf: "start", padding: "3px 8px", border: "1px solid", borderRadius: 999, fontSize: 10, fontWeight: 800, ...journeyStatusStyle("waiting"), background: "var(--handrail-enhancement-surface)" }}>Needs your input</span>
+    {informationRequest.current_behavior && <div>
+      <span style={sectionLabel}>What it does today</span>
+      <p style={prose}>{informationRequest.current_behavior}</p>
+    </div>}
+    <p style={{ ...prose, fontSize: 13, fontWeight: 700 }}>{informationRequest.question}</p>
+    {hasOptions && <div role="group" aria-label="Answer choices" data-handrail-enhancement-answer-options="true" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 220px), 1fr))", gap: 6 }}>
+      {informationRequest.options.map((option, index) => {
+        const letter = String.fromCharCode(65 + index);
+        const selected = draft.option === option;
+        return <button
+          key={`${index}:${option}`}
+          type="button"
+          aria-label={`${letter}. ${option}`}
+          aria-pressed={selected}
+          disabled={!interactive || sending}
+          onClick={() => onDraftChange(informationRequest.id, { ...draft, option: selected ? null : option })}
+          style={{
+            ...buttonStyle("secondary"),
+            display: "flex",
+            alignItems: "flex-start",
+            gap: 9,
+            width: "100%",
+            boxSizing: "border-box",
+            padding: "8px 10px",
+            textAlign: "left",
+            fontWeight: 600,
+            background: "var(--handrail-enhancement-surface)",
+            cursor: !interactive ? "default" : sending ? "wait" : "pointer",
+            ...(selected ? styles.selectedControl : {}),
+          }}
+        >
+          <span aria-hidden="true" style={{ flex: "0 0 22px", height: 22, lineHeight: "20px", boxSizing: "border-box", textAlign: "center", border: "1px solid currentColor", borderRadius: 6, fontSize: 11, fontWeight: 800, ...(selected ? { color: "var(--handrail-enhancement-accent-text)", borderColor: "var(--handrail-enhancement-accent)", background: "var(--handrail-enhancement-accent)" } : {}) }}>{letter}</span>
+          <span style={{ flex: 1, minWidth: 0, paddingTop: 2, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{option}</span>
+        </button>;
+      })}
+    </div>}
+    {interactive && <label htmlFor={answerId} style={{ ...styles.label, marginBottom: 0, fontSize: 12 }}>
+      <span>{hasOptions ? "Or write your own answer" : "Your answer"}{hasOptions && <span style={{ marginLeft: 6, color: "var(--handrail-enhancement-muted-text)", fontWeight: 400 }}>Optional when a choice is selected</span>}</span>
+      <textarea
+        id={answerId}
+        value={draft.answer}
+        maxLength={MAX_INFORMATION_REQUEST_ANSWER_LENGTH}
+        rows={2}
+        disabled={sending}
+        onChange={(event) => onDraftChange(informationRequest.id, { ...draft, answer: event.target.value })}
+        placeholder={hasOptions ? "Add detail or describe a different answer…" : "Type your answer…"}
+        style={{ ...styles.input, minHeight: 60, resize: "vertical", fontWeight: 400 }}
+      />
+    </label>}
+    {!canAnswer && <p style={{ ...prose, color: "var(--handrail-enhancement-muted-text)", fontSize: 11 }}>Answers can’t be sent from this app yet.</p>}
+    {sent && <p role="status" style={{ ...prose, color: "var(--handrail-enhancement-success-text)", fontWeight: 700 }}>Answer sent. The team will continue from here.</p>}
+    {error && <p role="alert" style={{ ...prose, color: "var(--handrail-enhancement-danger-text)", fontWeight: 600 }}>{error}</p>}
+    {interactive && <div data-handrail-enhancement-answer-actions="true" style={{ display: "flex", justifyContent: "flex-end" }}>
+      <button type="submit" disabled={!ready || sending} style={{ ...buttonStyle("primary"), opacity: !ready || sending ? 0.55 : 1, cursor: sending ? "wait" : ready ? "pointer" : "default" }}>{sending ? "Sending…" : "Send answer"}</button>
+    </div>}
+  </form>;
+}
+
 function HistoryRow({
   request,
   busy,
@@ -903,8 +1037,18 @@ function HistoryRow({
   canRestore,
   onArchive,
   onRestore,
+  informationRequest,
+  answerState,
+  canAnswer,
+  onAnswerDraftChange,
+  onSendAnswer,
 }: {
   readonly request: EnhancementRequestRecord;
+  readonly informationRequest: EnhancementInformationRequest | null;
+  readonly answerState: InformationAnswerState;
+  readonly canAnswer: boolean;
+  readonly onAnswerDraftChange: (informationRequestId: string, draft: InformationAnswerDraft) => void;
+  readonly onSendAnswer: (request: EnhancementRequestRecord, informationRequest: EnhancementInformationRequest) => Promise<void>;
   readonly busy: boolean;
   readonly expanded: boolean;
   readonly onToggle: (requestId: string) => void;
@@ -948,6 +1092,14 @@ function HistoryRow({
         ? <button type="button" aria-label={`Restore ${request.title}`} disabled={busy} onClick={() => void onRestore(request.id)} style={{ border: 0, padding: "6px 2px", color: "var(--handrail-enhancement-accent)", background: "transparent", cursor: busy ? "wait" : "pointer", font: "inherit", fontSize: 12, fontWeight: 800 }}>{busy ? "Restoring…" : "Restore"}</button>
         : !request.dismissed && <button type="button" aria-label={`Archive ${request.title}`} disabled={busy} onClick={() => void onArchive(request.id)} style={{ border: 0, padding: "6px 2px", color: "var(--handrail-enhancement-accent)", background: "transparent", cursor: busy ? "wait" : "pointer", font: "inherit", fontSize: 12, fontWeight: 800 }}>{busy ? "Archiving…" : "Archive"}</button>)}
     </div>
+    {informationRequest && <InformationRequestCard
+      request={request}
+      informationRequest={informationRequest}
+      state={answerState}
+      canAnswer={canAnswer && informationRequest.response_allowed}
+      onDraftChange={onAnswerDraftChange}
+      onSend={onSendAnswer}
+    />}
     {expanded && <div role="cell" data-handrail-enhancement-history-detail="true" style={{ gridColumn: "1 / -1", display: "grid", gridTemplateColumns: "minmax(0, 1.7fr) minmax(250px, .8fr)", gap: 12, padding: 12, border: "1px solid var(--handrail-enhancement-border)", borderRadius: 10, color: "var(--handrail-enhancement-muted-text)", background: "var(--handrail-enhancement-surface-muted)", fontSize: 11 }}>
       <section style={{ display: "grid", minWidth: 0, gap: 12 }}>
         <div>
@@ -1061,8 +1213,19 @@ function EnhancementSessionDialog({
   const [loadingHistory, setLoadingHistory] = useState(false);
   const [busyHistoryId, setBusyHistoryId] = useState<string | null>(null);
   const [expandedRequestId, setExpandedRequestId] = useState<string | null>(null);
+  // Answer cards are keyed by information_request.id so history reloads never
+  // drop a half-typed answer or selected choice.
+  const [answerStates, setAnswerStates] = useState<Readonly<Record<string, InformationAnswerState>>>({});
+  const answerAbortRef = useRef(new Map<string, AbortController>());
+  const answerInputPending = history.some((request) => {
+    const informationRequest = enhancementInformationRequest(request);
+    const state = informationRequest ? answerStates[informationRequest.id] : undefined;
+    return Boolean(state && (state.sending || (
+      !state.sent && !state.closed && (state.draft.option !== null || state.draft.answer.length > 0)
+    )));
+  });
   const readingHistoryRef = useRef(false);
-  readingHistoryRef.current = expandedRequestId !== null;
+  readingHistoryRef.current = expandedRequestId !== null || answerInputPending;
   const [historyImagePreview, setHistoryImagePreview] = useState<{
     readonly images: readonly PreviewableImage[];
     readonly activeIndex: number;
@@ -1235,6 +1398,8 @@ function EnhancementSessionDialog({
     return () => {
       cancelled = true;
       historyAbortRef.current?.abort();
+      for (const controller of answerAbortRef.current.values()) controller.abort();
+      answerAbortRef.current.clear();
       historyGenerationRef.current += 1;
       historyLoadingRef.current = false;
       historyDiscoveryReadyRef.current = false;
@@ -1482,6 +1647,54 @@ function EnhancementSessionDialog({
         : "Could not restore the enhancement request.");
     } finally {
       setBusyHistoryId(null);
+    }
+  };
+
+  const updateAnswerState = (informationRequestId: string, patch: Partial<InformationAnswerState>) => {
+    setAnswerStates((current) => ({
+      ...current,
+      [informationRequestId]: {
+        ...(current[informationRequestId] || INITIAL_ANSWER_STATE),
+        ...patch,
+      },
+    }));
+  };
+
+  const changeAnswerDraft = (informationRequestId: string, draft: InformationAnswerDraft) => {
+    updateAnswerState(informationRequestId, { draft, error: null });
+  };
+
+  const sendInformationAnswer = async (
+    request: EnhancementRequestRecord,
+    informationRequest: EnhancementInformationRequest,
+  ) => {
+    const informationRequestId = informationRequest.id;
+    const draft = answerStates[informationRequestId]?.draft || EMPTY_ANSWER_DRAFT;
+    if (!answerDraftReady(draft) || answerAbortRef.current.has(informationRequestId)) return;
+    const controller = new AbortController();
+    answerAbortRef.current.set(informationRequestId, controller);
+    updateAnswerState(informationRequestId, { sending: true, error: null });
+    try {
+      await client.answerInformationRequest(request.id, {
+        informationRequestId,
+        ...(draft.option !== null ? { option: draft.option } : {}),
+        ...(draft.answer.trim() ? { answer: draft.answer.trim() } : {}),
+        signal: controller.signal,
+      });
+      if (controller.signal.aborted) return;
+      updateAnswerState(informationRequestId, { draft: EMPTY_ANSWER_DRAFT, sending: false, sent: true });
+      void loadHistory(0, currentHistoryQuery(), true);
+    } catch (caught) {
+      if (controller.signal.aborted) return;
+      const statusCode = (caught as { statusCode?: unknown } | null)?.statusCode;
+      updateAnswerState(informationRequestId, {
+        sending: false,
+        error: caught instanceof Error && caught.message ? caught.message : "Could not send your answer.",
+        closed: statusCode === 404 || statusCode === 409,
+      });
+    } finally {
+      if (answerAbortRef.current.get(informationRequestId) === controller) answerAbortRef.current.delete(informationRequestId);
+      if (controller.signal.aborted) updateAnswerState(informationRequestId, { sending: false });
     }
   };
 
@@ -1872,7 +2085,9 @@ function EnhancementSessionDialog({
             <div role="row" data-handrail-enhancement-history-header="true" style={styles.historyListHeader}>
               <span role="columnheader">Request</span><span role="columnheader">Delivery progress</span><span role="columnheader">Outcome</span><span role="columnheader">Submitted</span><span role="columnheader">Action</span>
             </div>
-            {history.map((request) => <HistoryRow
+            {history.map((request) => {
+              const informationRequest = enhancementInformationRequest(request);
+              return <HistoryRow
               key={request.id}
               request={request}
               busy={busyHistoryId === request.id}
@@ -1883,7 +2098,13 @@ function EnhancementSessionDialog({
               canRestore={historyCapabilities?.restore === true}
               onArchive={archiveRequest}
               onRestore={restoreRequest}
-            />)}
+              informationRequest={informationRequest}
+              answerState={(informationRequest && answerStates[informationRequest.id]) || INITIAL_ANSWER_STATE}
+              canAnswer={typeof client.answerInformationRequest === "function"}
+              onAnswerDraftChange={changeAnswerDraft}
+              onSendAnswer={sendInformationAnswer}
+            />;
+            })}
           </div>}
           <div style={styles.historyFooter}>
             <span style={{ color: "var(--handrail-enhancement-muted-text)", fontSize: 11 }}>Showing {history.length} of {historyTotal} request{historyTotal === 1 ? "" : "s"}</span>

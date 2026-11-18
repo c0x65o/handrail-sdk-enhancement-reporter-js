@@ -3,6 +3,9 @@ import {
   EnhancementReporterDialog,
   EnhancementReporterProvider,
   createEnhancementReporter,
+  enhancementInformationRequest,
+  type EnhancementInformationRequest,
+  type EnhancementInformationRequestAnswerResult,
   type EnhancementReporterAppearance,
   type EnhancementReporterDialogProps,
   type EnhancementReporterStyle,
@@ -26,6 +29,12 @@ const requestTransport: Promise<EnhancementTransportClient> = requestScoped.forR
 
 const reporter = createEnhancementReporter({ endpoint: "/api/handrail-enhancements" });
 const configuredVersion: string | undefined = reporter.appVersion;
+const answered: Promise<EnhancementInformationRequestAnswerResult> = reporter.answerInformationRequest("request-1", {
+  informationRequestId: "information-request-1",
+  option: "Only visible columns",
+  answer: "Keep the current sort order.",
+});
+const question: EnhancementInformationRequest | null = enhancementInformationRequest({ status: "needs_clarification", information_request: null });
 const appearance: EnhancementReporterAppearance = {
   themeMode: "dark",
   tokens: { accent: "rebeccapurple", warningText: "#fbc46d", infoText: "#a7c7ff", radius: "4px" },
@@ -47,3 +56,5 @@ void legacyProps;
 void transportCompatibility;
 void requestTransport;
 void configuredVersion;
+void answered;
+void question;

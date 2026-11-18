@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   EnhancementReporterError,
   createEnhancementReporter,
+  enhancementInformationRequest,
   enhancementReleaseSummary,
   normalizeEnhancementImages,
 } from "../dist/index.js";
@@ -268,4 +269,106 @@ test('All users history discovers fresh verified policy and aborts stale respons
   const pending = reporter.list({ audience: 'all', signal: controller.signal });
   while (typeof release !== 'function') await new Promise(resolve => setTimeout(resolve, 1));
   controller.abort(); release(); await assert.rejects(pending, /cancelled/);
+});
+
+const informationRequest = {
+  id: "ir-1",
+  current_behavior: "Exports include every column.",
+  question: "Which columns should the export include?",
+  options: ["Only visible columns", "Every column"],
+  allows_written_answer: true,
+  asked_at: "2026-11-18T12:00:00.000Z",
+  response_allowed: true,
+  grants_implementation_authority: false,
+};
+
+test("answering an information request posts exactly the contract body to the same-origin route", async () => {
+  const calls = [];
+  const reporter = createEnhancementReporter({
+    fetch: async (url, init) => {
+      calls.push({ url, init });
+      return new Response(JSON.stringify({
+        contract_version: "v1", answered: true, replayed: false, information_request_id: "ir-1",
+        assessment_id: "assessment-2", assessment_status: "queued", warning: null,
+        implementation_authority: false, deployment_authority: false,
+      }));
+    },
+  });
+  const result = await reporter.answerInformationRequest("enh 1", {
+    informationRequestId: "ir-1",
+    option: "Only visible columns",
+    answer: "  Keep the sort order too.  ",
+  });
+  assert.equal(result.answered, true);
+  assert.equal(calls[0].url, "/api/handrail-enhancements/requests/enh%201/clarifications");
+  assert.equal(calls[0].init.method, "POST");
+  assert.equal(calls[0].init.credentials, "same-origin");
+  assert.equal(calls[0].init.headers["content-type"], "application/json");
+  assert.deepEqual(JSON.parse(calls[0].init.body), {
+    information_request_id: "ir-1",
+    option: "Only visible columns",
+    answer: "Keep the sort order too.",
+  });
+
+  await reporter.answerInformationRequest("enh-1", { informationRequestId: "ir-1", answer: "Just the totals." });
+  assert.deepEqual(JSON.parse(calls[1].init.body), { information_request_id: "ir-1", answer: "Just the totals." });
+  await reporter.answerInformationRequest("enh-1", { informationRequestId: "ir-1", option: "Every column", answer: "   " });
+  assert.deepEqual(JSON.parse(calls[2].init.body), { information_request_id: "ir-1", option: "Every column" });
+
+  await assert.rejects(reporter.answerInformationRequest("enh-1", { informationRequestId: "ir-1" }), { code: "information_request_answer_invalid" });
+  await assert.rejects(reporter.answerInformationRequest("enh-1", { informationRequestId: "", answer: "x" }), { code: "information_request_answer_invalid" });
+  await assert.rejects(reporter.answerInformationRequest("enh-1", { informationRequestId: "ir-1", answer: "x".repeat(4_001) }), { code: "information_request_answer_invalid" });
+  assert.equal(calls.length, 3, "invalid answers never reach the network");
+});
+
+test("answering surfaces server errors and honors abort signals", async () => {
+  let respond = async () => new Response(JSON.stringify({ error: "This question was already answered.", code: "information_request_already_answered" }), { status: 409 });
+  const reporter = createEnhancementReporter({ fetch: (...args) => respond(...args) });
+  await assert.rejects(
+    reporter.answerInformationRequest("enh-1", { informationRequestId: "ir-1", answer: "Yes" }),
+    (error) => error instanceof EnhancementReporterError
+      && error.code === "information_request_already_answered"
+      && error.statusCode === 409
+      && error.message === "This question was already answered.",
+  );
+  let seenSignal;
+  respond = async (_url, init) => { seenSignal = init.signal; return new Response(JSON.stringify({ contract_version: "v1", answered: true })); };
+  const controller = new AbortController();
+  controller.abort();
+  await assert.rejects(reporter.answerInformationRequest("enh-1", { informationRequestId: "ir-1", answer: "Yes", signal: controller.signal }), /cancelled/);
+  assert.equal(seenSignal, controller.signal);
+});
+
+test("history records tolerate missing and malformed information requests without rejecting the page", async () => {
+  const base = { title: "Export", status: "needs_clarification", status_group: "needs_attention", terminal: false, dismissed: false, dismissed_at: null };
+  const rows = [
+    { ...base, id: "valid", information_request: informationRequest },
+    { ...base, id: "missing" },
+    { ...base, id: "one-option", information_request: { ...informationRequest, options: ["Only one"] } },
+    { ...base, id: "five-options", information_request: { ...informationRequest, options: ["a", "b", "c", "d", "e"] } },
+    { ...base, id: "bad-options", information_request: { ...informationRequest, options: "Only visible columns" } },
+    { ...base, id: "non-string-option", information_request: { ...informationRequest, options: ["a", 2] } },
+    { ...base, id: "no-question", information_request: { ...informationRequest, question: "  " } },
+    { ...base, id: "string", information_request: "Which columns?" },
+    { ...base, id: "wrong-status", status: "assessing", status_group: "in_progress", information_request: informationRequest },
+    { ...base, id: "shared", is_owner: false, information_request: informationRequest },
+    { ...base, id: "write-in-only", information_request: { ...informationRequest, options: [], current_behavior: 7, response_allowed: "yes" } },
+  ];
+  const reporter = createEnhancementReporter({
+    fetch: async (url) => new Response(JSON.stringify(String(url).includes("/requests/")
+      ? { ...base, id: "valid", information_request: { ...informationRequest, extra: "ignored" } }
+      : { contract_version: "v1", requests: rows, summary: null, query: null, pagination: { limit: 20, offset: 0, total: rows.length, has_more: false } })),
+  });
+  const page = await reporter.list();
+  assert.equal(page.requests.length, rows.length);
+  const byId = Object.fromEntries(page.requests.map((row) => [row.id, row.information_request]));
+  assert.deepEqual(byId.valid, informationRequest);
+  for (const id of ["missing", "one-option", "five-options", "bad-options", "non-string-option", "no-question", "string", "wrong-status", "shared"]) {
+    assert.equal(byId[id], null, id);
+  }
+  assert.deepEqual(byId["write-in-only"], { ...informationRequest, options: [], current_behavior: null, response_allowed: false });
+  const lookedUp = await reporter.lookup("valid");
+  assert.deepEqual(lookedUp.information_request, informationRequest);
+  assert.equal(enhancementInformationRequest({ status: "needs_clarification" }), null);
+  assert.equal(enhancementInformationRequest(null), null);
 });

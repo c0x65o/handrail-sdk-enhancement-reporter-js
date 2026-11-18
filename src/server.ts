@@ -1,5 +1,12 @@
 import { ENHANCEMENT_SOURCE, reporterIdentity } from "./identity";
-import { MAX_ENHANCEMENT_IMAGES } from "./reporter";
+import { MAX_ENHANCEMENT_IMAGES, MAX_INFORMATION_REQUEST_ANSWER_LENGTH } from "./reporter";
+
+export interface EnhancementInformationRequestAnswerPayload {
+  readonly request_id: string;
+  readonly information_request_id: string;
+  readonly option?: string;
+  readonly answer?: string;
+}
 
 export interface EnhancementTransportClient {
   discover(): Promise<any>;
@@ -12,6 +19,7 @@ export interface EnhancementTransportClient {
   restore(input: { request_id: string }): Promise<any>;
   dismissSucceeded(): Promise<any>;
   cancel(input: { request_id: string; reason?: string | null }): Promise<any>;
+  answerInformationRequest?(input: EnhancementInformationRequestAnswerPayload): Promise<any>;
   downloadAttachment(input: { request_id: string; attachment_id: string }): Promise<{ data: Uint8Array; filename: string | null; mime_type: string; size_bytes: number }>;
 }
 
@@ -221,6 +229,10 @@ export function createEnhancementTransportClient(
     restore: ({ request_id }: { request_id: string }) => request(`requests/${encodeURIComponent(request_id)}/dismiss`, { method: "DELETE" }),
     dismissSucceeded: () => request("requests/dismiss-succeeded", { method: "POST", payload: {} }),
     cancel: ({ request_id, reason }: { request_id: string; reason?: string | null }) => request(`requests/${encodeURIComponent(request_id)}/cancel`, { method: "POST", payload: { reason: reason || null } }),
+    answerInformationRequest: ({ request_id, ...answer }: EnhancementInformationRequestAnswerPayload) => request(
+      `requests/${encodeURIComponent(request_id)}/clarifications`,
+      { method: "POST", payload: informationRequestAnswerBody(answer) },
+    ),
     async downloadAttachment({ request_id, attachment_id }: { request_id: string; attachment_id: string }) {
       const response = await perform(`requests/${encodeURIComponent(request_id)}/attachments/${encodeURIComponent(attachment_id)}`, {
         method: "GET",
@@ -359,6 +371,35 @@ function enhancementPayload(body: Record<string, any>): Record<string, unknown> 
   };
 }
 
+const INFORMATION_REQUEST_ANSWER_KEYS = new Set(["information_request_id", "option", "answer"]);
+
+function informationRequestAnswerBody(
+  { information_request_id, option, answer }: Omit<EnhancementInformationRequestAnswerPayload, "request_id">,
+): Record<string, string> {
+  return {
+    information_request_id,
+    ...(option !== undefined ? { option } : {}),
+    ...(answer !== undefined ? { answer } : {}),
+  };
+}
+
+/** Validates the browser body to exactly Handrail's answer shape, or returns null. */
+function informationRequestAnswerPayload(body: Record<string, any> | null): Omit<EnhancementInformationRequestAnswerPayload, "request_id"> | null {
+  if (!body || Object.keys(body).some((key) => !INFORMATION_REQUEST_ANSWER_KEYS.has(key))) return null;
+  const informationRequestId = clean(body.information_request_id, 160);
+  if (!informationRequestId) return null;
+  if (body.option != null && (typeof body.option !== "string" || !body.option.trim())) return null;
+  if (body.answer != null && typeof body.answer !== "string") return null;
+  const option = typeof body.option === "string" ? body.option : undefined;
+  const answer = typeof body.answer === "string" ? body.answer.trim() : "";
+  if (answer.length > MAX_INFORMATION_REQUEST_ANSWER_LENGTH || (!option && !answer)) return null;
+  return {
+    information_request_id: informationRequestId,
+    ...(option ? { option } : {}),
+    ...(answer ? { answer } : {}),
+  };
+}
+
 function decodePathPart(value: string): string | null {
   try { return clean(decodeURIComponent(value), 160) || null; } catch { return null; }
 }
@@ -440,6 +481,16 @@ export function createSameOriginEnhancementReporterHandler<RequestType extends R
             "content-disposition": `inline; filename="${safeName}"`,
             "cache-control": "private, no-store",
           } });
+        }
+        if (request.method === "POST" && parts.length === 3 && parts[2] === "clarifications") {
+          if (typeof client.answerInformationRequest !== "function") {
+            return json(501, { error: "Answering questions is not supported by this transport.", code: "information_request_answer_unsupported" });
+          }
+          const answer = informationRequestAnswerPayload(await requestBody(request));
+          if (!answer) {
+            return json(400, { error: "Send the question id with a listed choice or a written answer of 4000 characters or fewer.", code: "information_request_answer_invalid" });
+          }
+          return json(200, await client.answerInformationRequest({ request_id: requestId, ...answer }));
         }
         if (request.method === "POST" && parts.length === 3 && parts[2] === "cancel") {
           const body = await requestBody(request);
