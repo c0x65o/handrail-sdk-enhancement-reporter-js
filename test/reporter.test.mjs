@@ -363,7 +363,8 @@ test("history records tolerate missing and malformed information requests withou
   assert.equal(page.requests.length, rows.length);
   const byId = Object.fromEntries(page.requests.map((row) => [row.id, row.information_request]));
   assert.deepEqual(byId.valid, informationRequest);
-  for (const id of ["missing", "one-option", "five-options", "bad-options", "non-string-option", "no-question", "string", "wrong-status", "shared"]) {
+  assert.deepEqual(byId.shared, informationRequest);
+  for (const id of ["missing", "one-option", "five-options", "bad-options", "non-string-option", "no-question", "string", "wrong-status"]) {
     assert.equal(byId[id], null, id);
   }
   assert.deepEqual(byId["write-in-only"], { ...informationRequest, options: [], current_behavior: null, response_allowed: false });

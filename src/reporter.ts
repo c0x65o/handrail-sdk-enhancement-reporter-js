@@ -174,6 +174,7 @@ export interface EnhancementRequestRecord {
    * `status === "needs_clarification"` on the reporter's own requests; missing
    * or malformed values are normalized to null.
    */
+  readonly information_requests?: readonly EnhancementInformationRequest[];
   readonly information_request?: EnhancementInformationRequest | null;
   readonly dismissed_at: string | null;
   readonly dismissed: boolean;
@@ -185,6 +186,7 @@ export interface EnhancementRequestRecord {
 export const MAX_INFORMATION_REQUEST_ANSWER_LENGTH = 4_000;
 
 export interface EnhancementInformationRequest {
+  readonly answer?: { readonly option: string | null; readonly text: string | null };
   readonly id: string;
   /** What the product does today, when Handrail supplied it. */
   readonly current_behavior: string | null;
@@ -439,14 +441,19 @@ export function enhancementReleaseSummary(request: Pick<EnhancementRequestRecord
 export function enhancementInformationRequest(
   request: Pick<EnhancementRequestRecord, "status" | "is_owner" | "information_request"> | null | undefined,
 ): EnhancementInformationRequest | null {
-  if (!request || request.status !== "needs_clarification" || request.is_owner === false) return null;
-  const source = record(request.information_request);
+  if (!request || request.status !== "needs_clarification") return null;
+  return parseInformationRequest(request.information_request, request.is_owner !== false);
+}
+
+function parseInformationRequest(input: unknown, owner: boolean): EnhancementInformationRequest | null {
+  const source = record(input);
   if (!source) return null;
   const id = clean(source.id, 160);
   const question = clean(source.question, 20_000);
   if (!id || !question || !Array.isArray(source.options)) return null;
   const options = source.options.map((option: unknown) => (typeof option === "string" && option.trim() ? option : null));
   if (options.includes(null) || options.length === 1 || options.length > 4 || new Set(options).size !== options.length) return null;
+  const reply = record(source.answer);
   return Object.freeze({
     id,
     current_behavior: clean(source.current_behavior, 20_000) || null,
@@ -454,7 +461,8 @@ export function enhancementInformationRequest(
     options: Object.freeze(options as string[]),
     allows_written_answer: true,
     asked_at: clean(source.asked_at, 80) || null,
-    response_allowed: source.response_allowed === true,
+    ...(reply ? { answer: { option: clean(reply.option) || null, text: clean(reply.text) || null } } : {}),
+    response_allowed: !reply && (!source.status || source.status === "open") && (source.response_allowed === true || (owner && source.response_allowed === undefined)),
     grants_implementation_authority: false,
   });
 }
@@ -462,7 +470,7 @@ export function enhancementInformationRequest(
 function normalizeRequestRecord<T>(value: T): T {
   const source = record(value);
   if (!source) return value;
-  return { ...source, information_request: enhancementInformationRequest(source as EnhancementRequestRecord) } as T;
+  return { ...source, information_requests: Array.isArray(source.information_requests) ? source.information_requests.map((q: unknown) => parseInformationRequest(q, source.is_owner !== false)).filter(Boolean) : undefined, information_request: enhancementInformationRequest(source as EnhancementRequestRecord) } as T;
 }
 
 function endpointPath(value: unknown): string {

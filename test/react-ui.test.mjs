@@ -825,7 +825,7 @@ async function openClarificationHistory(sdk) {
 const answerCard = (renderer) => renderer.root.findAllByProps({ "data-handrail-enhancement-information-request": "true" }).find((node) => node.type === "form");
 const sendButton = (renderer) => answerCard(renderer).findAll((node) => node.type === "button" && node.props.type === "submit")[0];
 
-test("My requests shows an answer card for information requests and sends a choice with a written answer", async () => {
+for (const owner of [true, false]) test(`My requests sends a choice with a written answer on an ${owner ? "owner" : "authorized shared"} row`, async () => {
   let answered = false;
   const answerCalls = [];
   const listCalls = [];
@@ -834,7 +834,7 @@ test("My requests shows an answer card for information requests and sends a choi
     listCalls.push(options);
     const request = answered
       ? { ...clarificationRequest(), status: "assessing", status_group: "in_progress", information_request: null }
-      : clarificationRequest();
+      : { ...clarificationRequest(), is_owner: owner };
     return {
       contract_version: "v1",
       requests: [request],
@@ -942,7 +942,7 @@ test("an answer card is read-only when this app cannot send answers", async () =
   const sdk = client(async () => discovery({ history: clarificationHistory }));
   sdk.list = async (options) => ({
     contract_version: "v1",
-    requests: [clarificationRequest({ response_allowed: false })],
+    requests: [{ ...clarificationRequest({ response_allowed: false }), is_owner: false }],
     pagination: { limit: options.limit, offset: 0, total: 1, has_more: false },
     summary: null,
   });
@@ -951,7 +951,7 @@ test("an answer card is read-only when this app cannot send answers", async () =
   const card = answerCard(renderer);
   const text = renderedText(card);
   assert.match(text, /Which rows should the export include\?/u);
-  assert.match(text, /Answers can’t be sent from this app yet\./u);
+  assert.match(text, /The reporter has been asked\./u);
   assert.equal(card.findAllByType("textarea").length, 0);
   assert.equal(card.findAll((node) => node.type === "button" && node.props.type === "submit").length, 0);
   assert.ok(card.findByProps({ "aria-label": "Answer choices" }).findAllByType("button").every((choice) => choice.props.disabled === true));
@@ -1010,4 +1010,17 @@ test("background refresh pauses while an answer card has unsent input and keeps 
     globalThis.clearInterval = originalClearInterval;
     await act(async () => renderer.unmount());
   }
+});
+
+test("shared history retains answered Q&A after assessment resumes", async () => {
+  const sdk = client(async () => discovery({ history: clarificationHistory }));
+  const row = clarificationRequest();
+  sdk.list = async () => ({ requests: [{ ...row, status: "assessing", is_owner: false,
+    information_request: null, information_requests: [{ ...row.information_request, answer: { text: "Visible rows" } }] }],
+    pagination: { total: 1, has_more: false } });
+  const renderer = await openClarificationHistory(sdk);
+  const card = answerCard(renderer);
+  assert.match(renderedText(card), /Which rows.*Visible rows/s);
+  assert.equal(card.findAllByType("textarea").length, 0);
+  await act(async () => renderer.unmount());
 });

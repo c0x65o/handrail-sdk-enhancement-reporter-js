@@ -924,6 +924,17 @@ function answerDraftReady(draft: InformationAnswerDraft): boolean {
   return draft.option !== null || draft.answer.trim().length > 0;
 }
 
+function rowQuestions(row: EnhancementRequestRecord): readonly EnhancementInformationRequest[] {
+  const active = enhancementInformationRequest(row);
+  const questions = new Map<string, EnhancementInformationRequest>();
+  for (const entry of row.information_requests || []) {
+    const q = enhancementInformationRequest({ status: "needs_clarification", is_owner: row.is_owner, information_request: entry });
+    if (q) questions.set(q.id, q);
+  }
+  if (active) questions.set(active.id, active);
+  return Array.from(questions.values());
+}
+
 function InformationRequestCard({
   request,
   informationRequest,
@@ -968,7 +979,7 @@ function InformationRequestCard({
       fontSize: 12,
     }}
   >
-    <span style={{ justifySelf: "start", padding: "3px 8px", border: "1px solid", borderRadius: 999, fontSize: 10, fontWeight: 800, ...journeyStatusStyle("waiting"), background: "var(--handrail-enhancement-surface)" }}>Needs your input</span>
+    <span style={{ justifySelf: "start", padding: "3px 8px", border: "1px solid", borderRadius: 999, fontSize: 10, fontWeight: 800, ...journeyStatusStyle("waiting"), background: "var(--handrail-enhancement-surface)" }}>{informationRequest.answer ? "Answered" : canAnswer ? "Needs your input" : "Clarification"}</span>
     {informationRequest.current_behavior && <div>
       <span style={sectionLabel}>What it does today</span>
       <p style={prose}>{informationRequest.current_behavior}</p>
@@ -1018,7 +1029,7 @@ function InformationRequestCard({
         style={{ ...styles.input, minHeight: 60, resize: "vertical", fontWeight: 400 }}
       />
     </label>}
-    {!canAnswer && <p style={{ ...prose, color: "var(--handrail-enhancement-muted-text)", fontSize: 11 }}>Answers can’t be sent from this app yet.</p>}
+    {!canAnswer && <p style={{ ...prose, color: "var(--handrail-enhancement-muted-text)", fontSize: 11 }}>{informationRequest.answer ? [informationRequest.answer.option, informationRequest.answer.text].filter(Boolean).join(" · ") : "The reporter has been asked."}</p>}
     {sent && <p role="status" style={{ ...prose, color: "var(--handrail-enhancement-success-text)", fontWeight: 700 }}>Answer sent. The team will continue from here.</p>}
     {error && <p role="alert" style={{ ...prose, color: "var(--handrail-enhancement-danger-text)", fontWeight: 600 }}>{error}</p>}
     {interactive && <div data-handrail-enhancement-answer-actions="true" style={{ display: "flex", justifyContent: "flex-end" }}>
@@ -1037,15 +1048,13 @@ function HistoryRow({
   canRestore,
   onArchive,
   onRestore,
-  informationRequest,
-  answerState,
+  answerStates,
   canAnswer,
   onAnswerDraftChange,
   onSendAnswer,
 }: {
   readonly request: EnhancementRequestRecord;
-  readonly informationRequest: EnhancementInformationRequest | null;
-  readonly answerState: InformationAnswerState;
+  readonly answerStates: Readonly<Record<string, InformationAnswerState>>;
   readonly canAnswer: boolean;
   readonly onAnswerDraftChange: (informationRequestId: string, draft: InformationAnswerDraft) => void;
   readonly onSendAnswer: (request: EnhancementRequestRecord, informationRequest: EnhancementInformationRequest) => Promise<void>;
@@ -1092,14 +1101,14 @@ function HistoryRow({
         ? <button type="button" aria-label={`Restore ${request.title}`} disabled={busy} onClick={() => void onRestore(request.id)} style={{ border: 0, padding: "6px 2px", color: "var(--handrail-enhancement-accent)", background: "transparent", cursor: busy ? "wait" : "pointer", font: "inherit", fontSize: 12, fontWeight: 800 }}>{busy ? "Restoring…" : "Restore"}</button>
         : !request.dismissed && <button type="button" aria-label={`Archive ${request.title}`} disabled={busy} onClick={() => void onArchive(request.id)} style={{ border: 0, padding: "6px 2px", color: "var(--handrail-enhancement-accent)", background: "transparent", cursor: busy ? "wait" : "pointer", font: "inherit", fontSize: 12, fontWeight: 800 }}>{busy ? "Archiving…" : "Archive"}</button>)}
     </div>
-    {informationRequest && <InformationRequestCard
+    {rowQuestions(request).map(informationRequest => <InformationRequestCard key={informationRequest.id}
       request={request}
       informationRequest={informationRequest}
-      state={answerState}
+      state={answerStates[informationRequest.id] || INITIAL_ANSWER_STATE}
       canAnswer={canAnswer && informationRequest.response_allowed}
       onDraftChange={onAnswerDraftChange}
       onSend={onSendAnswer}
-    />}
+    />)}
     {expanded && <div role="cell" data-handrail-enhancement-history-detail="true" style={{ gridColumn: "1 / -1", display: "grid", gridTemplateColumns: "minmax(0, 1.7fr) minmax(250px, .8fr)", gap: 12, padding: 12, border: "1px solid var(--handrail-enhancement-border)", borderRadius: 10, color: "var(--handrail-enhancement-muted-text)", background: "var(--handrail-enhancement-surface-muted)", fontSize: 11 }}>
       <section style={{ display: "grid", minWidth: 0, gap: 12 }}>
         <div>
@@ -1217,13 +1226,12 @@ function EnhancementSessionDialog({
   // drop a half-typed answer or selected choice.
   const [answerStates, setAnswerStates] = useState<Readonly<Record<string, InformationAnswerState>>>({});
   const answerAbortRef = useRef(new Map<string, AbortController>());
-  const answerInputPending = history.some((request) => {
-    const informationRequest = enhancementInformationRequest(request);
-    const state = informationRequest ? answerStates[informationRequest.id] : undefined;
+  const answerInputPending = history.some(request => rowQuestions(request).some(question => {
+    const state = answerStates[question.id];
     return Boolean(state && (state.sending || (
       !state.sent && !state.closed && (state.draft.option !== null || state.draft.answer.length > 0)
     )));
-  });
+  }));
   const readingHistoryRef = useRef(false);
   readingHistoryRef.current = expandedRequestId !== null || answerInputPending;
   const [historyImagePreview, setHistoryImagePreview] = useState<{
@@ -2086,7 +2094,6 @@ function EnhancementSessionDialog({
               <span role="columnheader">Request</span><span role="columnheader">Delivery progress</span><span role="columnheader">Outcome</span><span role="columnheader">Submitted</span><span role="columnheader">Action</span>
             </div>
             {history.map((request) => {
-              const informationRequest = enhancementInformationRequest(request);
               return <HistoryRow
               key={request.id}
               request={request}
@@ -2098,8 +2105,7 @@ function EnhancementSessionDialog({
               canRestore={historyCapabilities?.restore === true}
               onArchive={archiveRequest}
               onRestore={restoreRequest}
-              informationRequest={informationRequest}
-              answerState={(informationRequest && answerStates[informationRequest.id]) || INITIAL_ANSWER_STATE}
+              answerStates={answerStates}
               canAnswer={typeof client.answerInformationRequest === "function"}
               onAnswerDraftChange={changeAnswerDraft}
               onSendAnswer={sendInformationAnswer}
