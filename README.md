@@ -276,7 +276,7 @@ changes the first-class enhancement or any later linked implementation Work Requ
 `EnhancementReporterDialog` to use another page size from 1 through 50.
 
 When Handrail needs one more detail before it can assess a request, the request
-waits in `needs_clarification` and carries a single `information_request`.
+waits in `needs_clarification` and carries the active `information_request`.
 **My requests** shows a **Needs your input** card on that row without
 expanding it: what the product does today (when supplied), the question, up to
 four lettered choices, and an **Or write your own answer** field. A choice, a
@@ -285,7 +285,7 @@ present. Server validation errors appear inline on the card. After a successful
 answer the list refreshes and the row moves on to assessment. The 15-second
 refresh pauses while a card holds an unsent choice or text, and drafts are kept
 per question across reloads. When `response_allowed` is false the question is
-shown read-only with a note that answers cannot be sent from this app yet.
+shown read-only with a note that the reporter has been asked.
 Answering never grants implementation or deployment authority.
 
 The SDK does not impose a history screen on app-owned integrations. `list` returns exact summary counts for a tab badge and status filters, plus the server-normalized query. Apps can style Active and Archived views independently and restore individual requests while preserving every canonical enhancement. The wire-level visibility value remains `dismissed` for compatibility.
@@ -350,8 +350,9 @@ function SuggestionForm() {
 
 `list({ limit, offset, search, statusGroup, sort, visibility })` returns bounded pagination metadata, exact counts for `needs_attention`, `in_progress`, `succeeded`, and `closed`, customer-facing journey counts, and the normalized query. Each request's `delivery_journey` is projected server-side from canonical assessment, policy authorization, Work Request step, release, and post-release confirmation evidence. Missing deployment evidence remains pending or unavailable; `Released` requires successful deployment evidence. Confirmation appears only after release and never delays or undoes the released outcome. `visibility` accepts `active`, `dismissed`, or `all`. `releaseStatus` reports the eventual full commit SHA/version and its deployment state after policy-authorized implementation produces and delivers the linked Work Request. `dismiss`, `restore`, and `dismissSucceeded` change only the current principal's history presentation while preserving the first-class enhancement and any later linked implementation Work Request.
 
-`information_request` is `null` unless the request is the reporter's own and its
-status is `needs_clarification`; the client normalizes a missing or malformed
+Owner and shared rows can carry an active `information_request` when their status
+is `needs_clarification`. The ordered `information_requests` list, when present,
+also carries previously answered questions. The client normalizes a missing or malformed
 value to `null` (also available as `enhancementInformationRequest(record)`).
 `answerInformationRequest(requestId, { informationRequestId, option?, answer?, signal? })`
 posts `{ information_request_id, option?, answer? }` to the same-origin
